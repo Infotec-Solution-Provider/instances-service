@@ -1,0 +1,56 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgres"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id       Int    @id @default(autoincrement())
+  name     String
+  login    String @unique
+  password String
+
+  @@map("users")
+}
+
+model Client {
+  name       String      @id @unique
+  server     Server?
+  parameters Parameters?
+
+  @@map("clients")
+}
+
+model Server {
+  client_name String @id @unique
+  host        String
+  port        Int
+  username    String
+  password    String
+  database    String
+  client      Client @relation(fields: [client_name], references: [name])
+
+  @@map("clients_servers")
+}
+
+model Parameters {
+  client_name String @id @unique
+  parameters  Json
+  client      Client @relation(fields: [client_name], references: [name])
+
+  @@map("clients_parameters")
+}
+
+enum DatabaseType {
+  POSTGRES
+  MYSQL
+  SQLSERVER
+  COCKROACHDB
+  MONGODB
+}
