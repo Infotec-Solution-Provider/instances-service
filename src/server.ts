@@ -1,7 +1,6 @@
 import app from "./app";
-import yargs from "yargs";
+import "dotenv/config";
 
-const args = yargs.parse();
-const port = parseInt(Object.entries(args)[0][1]) || 8000;
+const port = Number(process.env.LISTEN_PORT) || 8000;
 
 app.listen(port, () => console.log(`App is running on port ${port}`));
