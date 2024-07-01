@@ -4,6 +4,7 @@ import validateDto from "inpulse-crm/utils/src/validateDto";
 import { CreateInstanceDto } from "./dto/create-instance.dto";
 import InstancesService from "./instances.service";
 import { NotFoundError } from "@rgranatodutra/http-errors";
+import AuthService from "../auth/auth.service";
 
 class InstancesController {
     public readonly router: core.Router;
@@ -11,9 +12,9 @@ class InstancesController {
     constructor() {
         this.router = Router();
 
-        this.router.post("/api/instances", validateDto(CreateInstanceDto), this.create);
-        this.router.get("/api/instances", this.list);
-        this.router.get("/api/instances/:clientName", this.getOneByName);
+        this.router.post("/api/instances", AuthService.validateTokenMiddleware, validateDto(CreateInstanceDto), this.create);
+        this.router.get("/api/instances", AuthService.validateTokenMiddleware, this.list);
+        this.router.get("/api/instances/:clientName", AuthService.validateTokenMiddleware, this.getOneByName);
     }
 
     private async create(req: Request, res: Response): Promise<Response> {

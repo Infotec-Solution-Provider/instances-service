@@ -5,6 +5,7 @@ import ServersService from "./servers.service";
 import InstancesService from "../instances/instances.service";
 import { NotFoundError } from "@rgranatodutra/http-errors";
 import { CreateServerDto } from "./dto/create-server.dto";
+import AuthService from "../auth/auth.service";
 
 class ServersController {
     public readonly router: core.Router;
@@ -12,7 +13,7 @@ class ServersController {
     constructor() {
         this.router = Router();
 
-        this.router.put("/api/instances/:clientName/server", validateDto(CreateServerDto), this.set);
+        this.router.put("/api/instances/:clientName/server", AuthService.validateTokenMiddleware, validateDto(CreateServerDto), this.set);
     }
 
     private async set(req: Request, res: Response): Promise<Response> {

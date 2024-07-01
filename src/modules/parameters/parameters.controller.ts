@@ -5,6 +5,7 @@ import InstancesService from "../instances/instances.service";
 import { NotFoundError } from "@rgranatodutra/http-errors";
 import { CreateParametersDto } from "./dto/create-parameter.dto";
 import ParametersService from "./parameters.service";
+import AuthService from "../auth/auth.service";
 
 class ParametersController {
     public readonly router: core.Router;
@@ -12,7 +13,7 @@ class ParametersController {
     constructor() {
         this.router = Router();
 
-        this.router.put("/api/instances/:clientName/parameters", validateDto(CreateParametersDto), this.set);
+        this.router.put("/api/instances/:clientName/parameters", AuthService.validateTokenMiddleware, validateDto(CreateParametersDto), this.set);
     }
 
     private async set(req: Request, res: Response): Promise<Response> {

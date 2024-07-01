@@ -22,7 +22,6 @@ const controllers = {
 app.use(express.json());
 app.use(cors());
 app.use(controllers.auth.router);
-//app.use(AuthService.validateTokenMiddleware);
 app.use(controllers.instances.router);
 app.use(controllers.servers.router);
 app.use(controllers.parameters.router);
