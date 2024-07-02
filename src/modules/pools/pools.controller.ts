@@ -1,6 +1,7 @@
 import { NextFunction, Request, Response, Router } from "express";
 import * as core from "express-serve-static-core";
 import PoolsService from "./pools.service";
+import "dotenv/config"
 
 class PoolsController {
     public readonly router: core.Router;
@@ -8,7 +9,7 @@ class PoolsController {
     constructor() {
         this.router = Router();
 
-        this.router.post("/api/instances/:clientName/query", this.checkLocalhost, this.executeQuery);
+        this.router.post("/api/instances/:clientName/query", this.checkWhitelistedIp, this.executeQuery);
     }
 
     private async executeQuery(req: Request, res: Response): Promise<Response> {
@@ -20,12 +21,12 @@ class PoolsController {
         return res.status(201).json(result);
     }
 
-    private checkLocalhost(req: Request, res: Response, next: NextFunction): void {
-        const localhostIps = ["127.0.0.1", "::1"];
-        if (localhostIps.includes(req.ip)) {
+    private checkWhitelistedIp(req: Request, res: Response, next: NextFunction): void {
+        const allowerIps = ["127.0.0.1", "::1", ...process.env.WHITELIST_IPS?.split(",")];
+        if (allowerIps.includes(req.ip)) {
             next();
         } else {
-            res.status(403).json({ error: "Access forbidden: Requests are only allowed from localhost" });
+            res.status(403).json({ error: "Access forbidden: address must be on whitelist" });
         }
     }
 }
