@@ -22,7 +22,8 @@ class PoolsController {
     }
 
     private checkWhitelistedIp(req: Request, res: Response, next: NextFunction): void {
-        console.log(req.originalUrl)
+        console.log(req.headers)
+        console.log(req.headers.origin)
         const allowerIps = ["127.0.0.1", "::1", ...process.env.WHITELIST_IPS?.split(",")];
         if (allowerIps.includes(req.ip)) {
             next();
