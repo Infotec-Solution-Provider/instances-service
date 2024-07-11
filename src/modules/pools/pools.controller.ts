@@ -23,9 +23,11 @@ class PoolsController {
 
     private checkWhitelistedIp(req: Request, res: Response, next: NextFunction): void {
         const allowerIps = ["127.0.0.1", "::1", ...process.env.WHITELIST_IPS?.split(",")];
-        if (allowerIps.includes(req.ip) || req.host === "contec.inf.br") {
+        if (allowerIps.includes(req.ip) || req.hostname === "contec.inf.br") {
             next();
         } else {
+
+            console.log(req.ip, req.hostname)
             res.status(403).json({ error: "Access forbidden: address must be on whitelist" });
         }
     }
