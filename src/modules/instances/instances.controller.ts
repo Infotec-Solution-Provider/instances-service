@@ -31,6 +31,8 @@ class InstancesController {
             []
         );
 
+        console.log(oldSchedules);
+
         for (const oldSchedule of oldSchedules as unknown as RowDataPacket[]) {
             const originalTimestamp = new Date(oldSchedule.DATA_AGENDAMENTO).getTime();
             const ajustedTimestamp = originalTimestamp - (3 * 60 * 60 * 1000);
