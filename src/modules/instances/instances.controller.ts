@@ -30,7 +30,9 @@ class InstancesController {
                 instance.name,
                 "SELECT * FROM w_atendimentos WHERE DATA_AGENDAMENTO IS NOT NULL AND AGUARDANDO_RETORNO = 'SIM'",
                 []
-            );
+            ).catch((err) => {
+                null
+            })
 
             if (!Array.isArray(oldSchedules)) {
                 continue;
