@@ -6,8 +6,9 @@ import InstancesService from "./instances.service";
 import { NotFoundError } from "@rgranatodutra/http-errors";
 import AuthService from "../auth/auth.service";
 import PoolsService from "../pools/pools.service";
-import { RowDataPacket } from "mysql2";
+import { QueryResult, RowDataPacket } from "mysql2";
 import axios from "axios";
+import { CustomQueryResult } from "../pools/types/query-result.type";
 
 class InstancesController {
     public readonly router: core.Router;
@@ -33,7 +34,7 @@ class InstancesController {
 
         console.log(oldSchedules);
 
-        for (const oldSchedule of oldSchedules as unknown as RowDataPacket[]) {
+        for (const oldSchedule of (oldSchedules as { result: QueryResult }).result as RowDataPacket[]) {
             const originalTimestamp = new Date(oldSchedule.DATA_AGENDAMENTO).getTime();
             const ajustedTimestamp = originalTimestamp - (3 * 60 * 60 * 1000);
             const ajustedDate = new Date(ajustedTimestamp);
