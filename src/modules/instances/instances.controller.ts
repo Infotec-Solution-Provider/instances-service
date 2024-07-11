@@ -18,7 +18,7 @@ class InstancesController {
         this.router.post("/api/instances", AuthService.validateTokenMiddleware, validateDto(CreateInstanceDto), this.create);
         this.router.get("/api/instances", AuthService.validateTokenMiddleware, this.list);
         this.router.get("/api/instances/:clientName", AuthService.validateTokenMiddleware, this.getOneByName);
-        this.router.get("/api/instances/schedules-routine", AuthService.validateTokenMiddleware, this.routine)
+        this.router.post("/api/instances/schedules-routine", AuthService.validateTokenMiddleware, this.routine)
     }
 
     private async routine(req: Request, res: Response): Promise<Response> {
