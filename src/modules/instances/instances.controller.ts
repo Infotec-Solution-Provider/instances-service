@@ -18,42 +18,35 @@ class InstancesController {
         this.router.post("/api/instances", AuthService.validateTokenMiddleware, validateDto(CreateInstanceDto), this.create);
         this.router.get("/api/instances", AuthService.validateTokenMiddleware, this.list);
         this.router.get("/api/instances/:clientName", AuthService.validateTokenMiddleware, this.getOneByName);
-        this.router.post("/api/instances/schedules-routine", AuthService.validateTokenMiddleware, this.routine)
+        this.router.get("/api/instances/:clientName/schedules-routine", AuthService.validateTokenMiddleware, this.routine)
     }
 
     private async routine(req: Request, res: Response): Promise<Response> {
-        const allInstances = await InstancesService.list();
+        const instance = await InstancesService.findByName(req.params.clientName);
         const generatedSchedules: any[] = [];
 
-        for (const instance of allInstances) {
-            const oldSchedules = await PoolsService.execute(
-                instance.name,
-                "SELECT * FROM w_atendimentos WHERE DATA_AGENDAMENTO IS NOT NULL AND AGUARDANDO_RETORNO = 'SIM'",
-                []
-            ).catch((err) => {
-                null
+        const oldSchedules = await PoolsService.execute(
+            instance.name,
+            "SELECT * FROM w_atendimentos WHERE DATA_AGENDAMENTO IS NOT NULL AND AGUARDANDO_RETORNO = 'SIM'",
+            []
+        );
+
+        for (const oldSchedule of oldSchedules as unknown as RowDataPacket[]) {
+            const originalTimestamp = new Date(oldSchedule.DATA_AGENDAMENTO).getTime();
+            const ajustedTimestamp = originalTimestamp - (3 * 60 * 60 * 1000);
+            const ajustedDate = new Date(ajustedTimestamp);
+
+            await axios.post(`http://localhost:7002/api/wa-schedules/${instance.name}`, {
+                scheduleDate: ajustedDate,
+                whatsappId: oldSchedule.CODIGO_NUMERO,
+                toUserId: oldSchedule.CODIGO_OPERADOR,
+                byUserId: oldSchedule.CODIGO_OPERADOR,
+                sectorId: oldSchedule.SETOR
             })
-
-            if (!Array.isArray(oldSchedules)) {
-                continue;
-            }
-
-            for (const oldSchedule of oldSchedules as unknown as RowDataPacket[]) {
-                const originalTimestamp = new Date(oldSchedule.DATA_AGENDAMENTO).getTime();
-                const ajustedTimestamp = originalTimestamp - (3 * 60 * 60 * 1000);
-                const ajustedDate = new Date(ajustedTimestamp);
-
-                await axios.post(`http://localhost:7002/api/wa-schedules/${instance.name}`, {
-                    scheduleDate: ajustedDate,
-                    whatsappId: oldSchedule.CODIGO_NUMERO,
-                    toUserId: oldSchedule.CODIGO_OPERADOR,
-                    byUserId: oldSchedule.CODIGO_OPERADOR,
-                    sectorId: oldSchedule.SETOR
-                })
-                    .then((res) => generatedSchedules.push(res.data.data))
-                    .catch((err) => console.log(err?.response?.data?.message || err));
-            }
+                .then((res) => generatedSchedules.push(res.data.data))
+                .catch((err) => console.log(err?.response?.data?.message || err));
         }
+
         return res.status(201).json({ message: "successful migrated schedules", data: generatedSchedules })
 
     }
