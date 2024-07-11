@@ -22,7 +22,9 @@ class PoolsController {
     }
 
     private checkWhitelistedIp(req: Request, res: Response, next: NextFunction): void {
-        const allowerIps = ["127.0.0.1", "::1", ...process.env.WHITELIST_IPS?.split(",")];
+        const allowerIps = ["127.0.0.1", "::1", "::ffff:127.0.0.1", "localhost", ...process.env.WHITELIST_IPS?.split(",")];
+
+
         if (allowerIps.includes(req.ip) || req.hostname === "contec.inf.br") {
             next();
         } else {
