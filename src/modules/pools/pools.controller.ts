@@ -28,8 +28,6 @@ class PoolsController {
         if (allowerIps.includes(req.ip) || req.hostname === "contec.inf.br") {
             next();
         } else {
-
-            console.log(req.ip, req.hostname)
             res.status(403).json({ error: "Access forbidden: address must be on whitelist" });
         }
     }

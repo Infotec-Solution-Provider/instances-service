@@ -8,7 +8,6 @@ import AuthService from "../auth/auth.service";
 import PoolsService from "../pools/pools.service";
 import { QueryResult, RowDataPacket } from "mysql2";
 import axios from "axios";
-import { CustomQueryResult } from "../pools/types/query-result.type";
 
 class InstancesController {
     public readonly router: core.Router;
