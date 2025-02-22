@@ -1,4 +1,3 @@
-import { plainToInstance } from "class-transformer";
 import { ServerDto } from "../dtos/create-server.dto";
 import { prisma } from "./prisma.service";
 
