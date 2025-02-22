@@ -1,11 +1,12 @@
 import { Request, Response, Router } from "express";
 import * as core from "express-serve-static-core";
 import validateDto from "inpulse-crm/utils/src/validateDto";
-import InstancesService from "../instances/instances.service";
 import { NotFoundError } from "@rgranatodutra/http-errors";
-import { CreateParametersDto } from "./dto/create-parameter.dto";
-import ParametersService from "./parameters.service";
-import AuthService from "../auth/auth.service";
+import AuthService from "../services/auth.service";
+import { CreateParametersDto } from "../dtos/create-parameter.dto";
+import InstancesService from "../services/instances.service";
+import ParametersService from "../services/parameters.service";
+
 
 class ParametersController {
     public readonly router: core.Router;
@@ -17,7 +18,7 @@ class ParametersController {
     }
 
     private async set(req: Request, res: Response): Promise<Response> {
-        const { clientName } = req.params;
+        const clientName = req.params["clientName"]!;	
         const findClient = await InstancesService.findByName(clientName);
 
         if (!findClient) {

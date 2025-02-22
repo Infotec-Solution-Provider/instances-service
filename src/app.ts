@@ -3,7 +3,7 @@ import express from "express";
 import cors from "cors";
 import { handleRequestError } from "@rgranatodutra/http-errors";
 import ServersController from "./modules/servers/servers.controller";
-import InstancesController from "./modules/instances/instances.controller";
+import InstancesController from "./controllers/instances.controller";
 import ParametersController from "./modules/parameters/parameters.controller";
 import getRouterEndpoints from "inpulse-crm/utils/src/getRouterEndpoints.util";
 import PoolsController from "./modules/pools/pools.controller";

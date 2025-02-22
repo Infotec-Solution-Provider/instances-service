@@ -1,5 +1,5 @@
 import { IsObject, IsOptional, IsString, MaxLength, MinLength, ValidateNested } from "class-validator";
-import { ServerDto } from "../../servers/dto/create-server.dto";
+import { ServerDto } from "./create-server.dto";
 import { Type } from "class-transformer";
 import "reflect-metadata";
 
