@@ -1,5 +1,6 @@
 {
   "dependencies": {
+    "@in.pulse-crm/utils": "^1.2.2",
     "@prisma/client": "^5.10.2",
     "@rgranatodutra/http-errors": "^1.0.7",
     "axios": "^1.7.2",
