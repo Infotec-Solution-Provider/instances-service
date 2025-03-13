@@ -4,46 +4,54 @@ import ClientPool from "../entities/client-pool.entity";
 import ServersService from "./servers.service";
 
 class PoolsService {
-  private static readonly pools: Array<ClientPool> = [];
+	private static readonly pools: Array<ClientPool> = [];
 
-  private static async getOrCreatePool(clientName: string) {
-    const findPool = PoolsService.pools.find((cp) => cp.name === clientName);
+	private static async getOrCreatePool(instanceName: string) {
+		const findPool = PoolsService.pools.find(
+			(cp) => cp.name === instanceName,
+		);
 
-    if (!findPool) {
-      const server = await ServersService.get(clientName);
+		if (!findPool) {
+			const server = await ServersService.get(instanceName);
 
-      if (!server) {
-        throw new NotFoundError(`Server de ${clientName} não encontrado.`);
-      }
+			if (!server) {
+				throw new NotFoundError(
+					`Server de ${instanceName} não encontrado.`,
+				);
+			}
 
-      const { host, port, username: user, password, database } = server;
+			const { host, port, username: user, password, database } = server;
 
-      const pool = createPool({
-        host,
-        port,
-        user,
-        password,
-        database,
-        maxPreparedStatements: 1000,
-      });
+			const pool = createPool({
+				host,
+				port,
+				user,
+				password,
+				database,
+				maxPreparedStatements: 1000,
+			});
 
-      const clientPool = new ClientPool(clientName, pool);
+			const clientPool = new ClientPool(instanceName, pool);
 
-      PoolsService.pools.push(clientPool);
+			PoolsService.pools.push(clientPool);
 
-      return clientPool;
-    }
+			return clientPool;
+		}
 
-    return findPool;
-  }
+		return findPool;
+	}
 
-  public static async query(clientName: string, query: string, parameters: unknown) {
-    const pool = await PoolsService.getOrCreatePool(clientName);
+	public static async query(
+		instanceName: string,
+		query: string,
+		parameters: unknown,
+	) {
+		const pool = await PoolsService.getOrCreatePool(instanceName);
 
-    const result = await pool.query(query, parameters);
+		const result = await pool.query(query, parameters);
 
-    return result;
-  }
+		return result;
+	}
 }
 
 export default PoolsService;

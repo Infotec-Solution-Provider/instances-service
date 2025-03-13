@@ -12,10 +12,10 @@ class InstancesService {
     const findDuplicated = await this.findByName(data.name);
 
     if (findDuplicated) {
-      throw new ConflictError("client already exists");
+      throw new ConflictError("instance already exists");
     }
 
-    const instance = await prisma.client.create({ data: { name: data.name } });
+    const instance = await prisma.instance.create({ data: { name: data.name } });
     const server = data.server
       ? await ServersService.upsert(instance.name, data.server)
       : null;
@@ -31,7 +31,7 @@ class InstancesService {
   }
 
   public static async findByName(name: string) {
-    const findInstance = await prisma.client.findUnique({
+    const findInstance = await prisma.instance.findUnique({
       where: { name },
       include: {
         server: true,
@@ -43,7 +43,7 @@ class InstancesService {
   }
 
   public static async list() {
-    const instances = await prisma.client.findMany({
+    const instances = await prisma.instance.findMany({
       include: {
         server: true,
         parameters: true,

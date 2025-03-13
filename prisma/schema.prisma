@@ -28,21 +28,21 @@ model Instance {
 }
 
 model Server {
-  instance_name String   @id @unique @map("instance_name")
+  instanceName String   @id @unique @map("instance_name")
   host          String
   port          Int
   username      String
   password      String
   database      String
-  client        Instance @relation(fields: [instance_name], references: [name])
+  client        Instance @relation(fields: [instanceName], references: [name])
 
   @@map("clients_servers")
 }
 
 model Parameters {
-  client_name String   @id @unique
+  instanceName String   @id @unique @map("instance_name")
   parameters  Json
-  client      Instance @relation(fields: [client_name], references: [name])
+  client      Instance @relation(fields: [instanceName], references: [name])
 
   @@map("clients_parameters")
 }
