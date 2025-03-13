@@ -6,7 +6,7 @@ generator client {
 }
 
 datasource db {
-  provider = "postgres"
+  provider = "mysql"
   url      = env("DATABASE_URL")
 }
 
@@ -19,7 +19,7 @@ model User {
   @@map("users")
 }
 
-model Client {
+model Instance {
   name       String      @id @unique
   server     Server?
   parameters Parameters?
@@ -28,29 +28,21 @@ model Client {
 }
 
 model Server {
-  client_name String @id @unique
-  host        String
-  port        Int
-  username    String
-  password    String
-  database    String
-  client      Client @relation(fields: [client_name], references: [name])
+  instance_name String   @id @unique @map("instance_name")
+  host          String
+  port          Int
+  username      String
+  password      String
+  database      String
+  client        Instance @relation(fields: [instance_name], references: [name])
 
   @@map("clients_servers")
 }
 
 model Parameters {
-  client_name String @id @unique
+  client_name String   @id @unique
   parameters  Json
-  client      Client @relation(fields: [client_name], references: [name])
+  client      Instance @relation(fields: [client_name], references: [name])
 
   @@map("clients_parameters")
-}
-
-enum DatabaseType {
-  POSTGRES
-  MYSQL
-  SQLSERVER
-  COCKROACHDB
-  MONGODB
 }

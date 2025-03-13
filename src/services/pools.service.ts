@@ -37,14 +37,12 @@ class PoolsService {
     return findPool;
   }
 
-  public static async query(
-    clientName: string,
-    query: string,
-    parameters: unknown
-  ) {
+  public static async query(clientName: string, query: string, parameters: unknown) {
     const pool = await PoolsService.getOrCreatePool(clientName);
 
-    return pool.query(query, parameters);
+    const result = await pool.query(query, parameters);
+
+    return result;
   }
 }
 

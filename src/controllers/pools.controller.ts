@@ -21,13 +21,23 @@ class PoolsController {
   private async executeQuery(req: Request, res: Response): Promise<Response> {
     const { query, parameters } = req.body as QueryDto;
 
-    const result = await PoolsService.query(
+    const data = await PoolsService.query(
       req.params["clientName"]!,
       query,
       parameters
     );
 
-    return res.status(201).json(result);
+    if("err" in data) {
+      return res.status(400).json({
+        message: "Failed to execute query!",
+        ...data
+      });
+    }
+
+    return res.status(200).json({
+      message: "Successful executed query!",
+      ...data
+    });
   }
 }
 
