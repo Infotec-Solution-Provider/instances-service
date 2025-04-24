@@ -29,6 +29,7 @@ class PoolsService {
 				password,
 				database,
 				maxPreparedStatements: 1000,
+				charset: "latin1_swedish_ci",
 			});
 
 			const clientPool = new ClientPool(instanceName, pool);
