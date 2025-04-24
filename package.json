@@ -1,6 +1,6 @@
 {
 	"dependencies": {
-		"@in.pulse-crm/utils": "^1.2.2",
+		"@in.pulse-crm/utils": "^1.3.0",
 		"@prisma/client": "^5.10.2",
 		"@rgranatodutra/http-errors": "^1.0.7",
 		"axios": "^1.7.2",
@@ -11,7 +11,9 @@
 		"dotenv": "^16.4.5",
 		"express": "^4.18.3",
 		"express-async-errors": "^3.1.1",
+		"inpulse-crm": "^1.0.17",
 		"jsonwebtoken": "^9.0.2",
+		"latest": "^0.2.0",
 		"mysql2": "^3.9.4",
 		"prisma": "^5.10.2",
 		"prompt": "^1.3.0",
@@ -33,8 +35,9 @@
 		"typescript": "^5.4.2"
 	},
 	"scripts": {
+		"test": "echo \"Error: no test specified\" && exit 1",
 		"dev": "ts-node-dev --transpile-only --respawn --ignore-watch node_modules src/main.ts",
-		"start": "node dist/main.js",
+		"start:prod": "node dist/server.js",
 		"build": "tsc"
 	},
 	"keywords": [],
