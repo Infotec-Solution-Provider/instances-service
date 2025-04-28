@@ -11,10 +11,10 @@ class ClientPool {
   }
 
   public async query(query: string, parameters: unknown) {
-    const queryResult = new Promise<CustomQueryResult>(async (res) => {
+    const queryResult = new Promise<CustomQueryResult>(async (res, rej) => {
       this.pool.query(query, parameters, (err, result) => {
         if (err) {
-          res({ err });
+          rej({ err });
         }
 
         res({ result });

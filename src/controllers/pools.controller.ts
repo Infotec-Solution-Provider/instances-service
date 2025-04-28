@@ -27,13 +27,6 @@ class PoolsController {
       parameters
     );
 
-    if("err" in data) {
-      return res.status(400).json({
-        message: "Failed to execute query!",
-        ...data
-      });
-    }
-
     return res.status(200).json({
       message: "Successful executed query!",
       ...data
