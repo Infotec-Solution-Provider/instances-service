@@ -48,8 +48,10 @@ class PoolsService {
 		parameters: unknown,
 	) {
 		const pool = await PoolsService.getOrCreatePool(instanceName);
+		console.log("2. ", query, parameters);
 
 		const result = await pool.query(query, parameters);
+		console.log("3. ", result);
 
 		return result;
 	}

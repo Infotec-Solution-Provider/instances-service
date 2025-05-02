@@ -1,28 +1,27 @@
-import { Pool } from "mysql2";
-import { CustomQueryResult } from "../types/query-result.type";
+import { Pool, QueryResult } from "mysql2";
 
 class ClientPool {
-  public readonly name: string;
-  private pool: Pool;
+	public readonly name: string;
+	private pool: Pool;
 
-  constructor(name: string, pool: Pool) {
-    this.name = name;
-    this.pool = pool;
-  }
+	constructor(name: string, pool: Pool) {
+		this.name = name;
+		this.pool = pool;
+	}
 
-  public async query(query: string, parameters: unknown) {
-    const queryResult = new Promise<CustomQueryResult>(async (res, rej) => {
-      this.pool.query(query, parameters, (err, result) => {
-        if (err) {
-          rej({ err });
-        }
+	public async query(query: string, parameters: unknown) {
+		const queryResult = new Promise<QueryResult>(async (res, rej) => {
+			this.pool.query(query, parameters, (err, result) => {
+				if (err) {
+					rej(err);
+				}
 
-        res({ result });
-      });
-    });
+				res(result);
+			});
+		});
 
-    return queryResult;
-  }
+		return queryResult;
+	}
 }
 
 export default ClientPool;
