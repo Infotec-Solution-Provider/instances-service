@@ -22,6 +22,41 @@ class ClientPool {
 
 		return queryResult;
 	}
+
+	/**
+	 * Verifica se a conexão está ativa executando uma query simples
+	 */
+	public async ping(): Promise<void> {
+		return new Promise<void>((resolve, reject) => {
+			this.pool.query("SELECT 1", (err) => {
+				if (err) {
+					reject(err);
+				} else {
+					resolve();
+				}
+			});
+		});
+	}
+
+	/**
+	 * Destroi o pool de conexões adequadamente
+	 */
+	public async destroy(): Promise<void> {
+		return new Promise<void>((resolve, reject) => {
+			this.pool.end((err) => {
+				if (err) {
+					console.error(
+						`Erro ao destruir pool ${this.name}:`,
+						err.message,
+					);
+					reject(err);
+				} else {
+					console.log(`Pool ${this.name} destruído com sucesso.`);
+					resolve();
+				}
+			});
+		});
+	}
 }
 
 export default ClientPool;
