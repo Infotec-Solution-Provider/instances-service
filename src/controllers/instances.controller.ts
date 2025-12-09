@@ -1,4 +1,4 @@
-import { Request, Response, Router } from "express";
+import express, { Request, Response, Router } from "express";
 import * as core from "express-serve-static-core";
 import validateDto from "inpulse-crm/utils/src/validateDto";
 import { CreateInstanceDto } from "../dtos/create-instance.dto";
@@ -11,6 +11,9 @@ class InstancesController {
 
   constructor() {
     this.router = Router();
+
+    this.router.use(express.json({ limit: "20mb" }));
+    this.router.use(express.urlencoded({ limit: "20mb", extended: true }));
 
     this.router.post(
       "/api/instances",
