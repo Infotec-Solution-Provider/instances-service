@@ -1,4 +1,4 @@
-import { Request, Response, Router } from "express";
+import express, { Request, Response, Router } from "express";
 import * as core from "express-serve-static-core";
 import "dotenv/config";
 import PoolsService from "../services/pools.service";
@@ -10,6 +10,10 @@ class PoolsController {
 
 	constructor() {
 		this.router = Router();
+
+		// Ensure this route accepts larger payloads for big queries/parameters
+		this.router.use(express.json({ limit: "20mb" }));
+		this.router.use(express.urlencoded({ limit: "20mb", extended: true }));
 
 		this.router.post(
 			"/api/instances/:clientName/query",
