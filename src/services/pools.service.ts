@@ -6,6 +6,7 @@ import ServersService from "./servers.service";
 class PoolsService {
 	private static readonly pools: Array<ClientPool> = [];
 	private static readonly poolHealthCheckInterval = 30000; // 30 segundos
+	private static readonly destroyingPools = new Set<string>();
 
 	private static setupPoolHealthCheck() {
 		setInterval(() => {
@@ -24,17 +25,32 @@ class PoolsService {
 	}
 
 	private static async removePool(instanceName: string) {
+		// Guard against concurrent destruction of the same pool
+		if (PoolsService.destroyingPools.has(instanceName)) {
+			return;
+		}
+
 		const index = PoolsService.pools.findIndex(
 			(cp) => cp.name === instanceName,
 		);
 
-		if (index !== -1) {
-			const pool = PoolsService.pools[index];
+		if (index === -1) {
+			return;
+		}
+
+		PoolsService.destroyingPools.add(instanceName);
+
+		const [pool] = PoolsService.pools.splice(index, 1);
+
+		try {
 			if (pool) {
 				await pool.destroy();
 			}
-			PoolsService.pools.splice(index, 1);
 			console.log(`Pool ${instanceName} removido e destruído.`);
+		} catch (err: any) {
+			console.error(`Erro ao destruir pool ${instanceName}:`, err.message);
+		} finally {
+			PoolsService.destroyingPools.delete(instanceName);
 		}
 	}
 
@@ -64,22 +80,21 @@ class PoolsService {
 				charset: "latin1_swedish_ci",
 				// Configurações de resiliência
 				connectionLimit: 10,
-				connectTimeout: 10000, // 10 segundos
+				connectTimeout: 60000, // 10 segundos
 				waitForConnections: true,
 				queueLimit: 0,
 				enableKeepAlive: true,
 				keepAliveInitialDelay: 0,
 			});
 
-			// Listener para erros de conexão
+			// Listener para erros fatais de protocolo (conexão irrecuperável)
+			// ETIMEDOUT em conexões individuais não destrói o pool — o health check cuida disso
 			pool.on("error", (err: any) => {
 				console.error(
 					`Erro no pool ${instanceName}:`,
 					err.message,
 				);
-				if (err.code === "PROTOCOL_CONNECTION_LOST" || 
-				    err.code === "ECONNRESET" || 
-				    err.code === "ETIMEDOUT") {
+				if (err.code === "PROTOCOL_CONNECTION_LOST") {
 					console.log(
 						`Conexão perdida para ${instanceName}. Pool será recriado na próxima query.`,
 					);
@@ -123,28 +138,22 @@ class PoolsService {
 					err.message,
 				);
 
-				// Se for erro de conexão, remover o pool e tentar novamente
-				if (
-					err.code === "PROTOCOL_CONNECTION_LOST" ||
-					err.code === "ECONNRESET" ||
-					err.code === "ETIMEDOUT" ||
-					err.code === "ENOTFOUND" ||
-					err.errno === "ECONNREFUSED"
-				) {
+				// Só destrói o pool em erros fatais de protocolo (estado irrecuperável).
+				// ETIMEDOUT/ECONNRESET em conexões individuais são gerenciados pelo próprio
+				// mysql2 — destruir o pool causaria falha em todas as queries paralelas.
+				if (err.code === "PROTOCOL_CONNECTION_LOST") {
 					await PoolsService.removePool(instanceName);
 
 					if (attempt < maxRetries) {
-						// Aguardar antes de tentar novamente (exponential backoff)
 						const delay = Math.min(1000 * Math.pow(2, attempt - 1), 5000);
-						console.log(
-							`Aguardando ${delay}ms antes de tentar reconectar...`,
-						);
+						console.log(`Aguardando ${delay}ms antes de tentar reconectar...`);
 						await new Promise((resolve) => setTimeout(resolve, delay));
 						continue;
 					}
 				}
 
-				// Para outros erros, falhar imediatamente
+				// Para todos os outros erros (incluindo ETIMEDOUT), falha imediatamente.
+				// O health check a cada 30s remove o pool se o servidor estiver inacessível.
 				throw err;
 			}
 		}

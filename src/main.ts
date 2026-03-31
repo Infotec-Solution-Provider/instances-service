@@ -8,6 +8,7 @@ import ServersController from "./controllers/servers.controller";
 import ParametersController from "./controllers/parameters.controller";
 import PoolsController from "./controllers/pools.controller";
 import AuthController from "./controllers/auth.controller";
+import GeoController from "./controllers/geo.controller";
 import { Logger, logRoutes } from "@in.pulse-crm/utils";
 
 const app = express();
@@ -19,6 +20,7 @@ const controllers = {
 	parameters: new ParametersController(),
 	pools: new PoolsController(),
 	auth: new AuthController(),
+	geo: new GeoController(),
 };
 
 app.use(express.json({ limit: "20mb" }));
@@ -29,6 +31,7 @@ app.use(controllers.instances.router);
 app.use(controllers.servers.router);
 app.use(controllers.parameters.router);
 app.use(controllers.pools.router);
+app.use(controllers.geo.router);
 
 logRoutes(
 	"",
