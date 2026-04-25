@@ -12,8 +12,7 @@ interface MemoryEntry<T> {
 }
 
 class GeoCacheService {
-	private static readonly IBGE_BASE_URL =
-		"https://servicodados.ibge.gov.br/api/v1/localidades";
+	private static readonly IBGE_BASE_URL = "https://servicodados.ibge.gov.br/api/v1/localidades";
 	private static readonly STATES_KEY = "states";
 	private static readonly STATES_TTL_MS = 24 * 60 * 60 * 1000; // 24h
 	private static readonly CITIES_TTL_MS = 24 * 60 * 60 * 1000; // 24h
