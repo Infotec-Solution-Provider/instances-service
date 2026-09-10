@@ -93,22 +93,22 @@ export function readZeroTierRecoveryConfig(
 	}
 	return {
 		enabled,
-		intervalMs: integer("ZEROTIER_RECOVERY_INTERVAL_MS", 30000, 1000),
+		intervalMs: integer("ZEROTIER_RECOVERY_INTERVAL_MS", 5000, 1000),
 		failureThreshold: integer("ZEROTIER_RECOVERY_FAILURE_THRESHOLD", 3, 2),
 		cooldownMs: integer("ZEROTIER_RECOVERY_COOLDOWN_MS", 5000, 60000),
 		startupGraceMs: integer(
 			"ZEROTIER_RECOVERY_STARTUP_GRACE_MS",
-			60000,
+			5000,
 			1000,
 		),
 		commandTimeoutMs: integer(
 			"ZEROTIER_RECOVERY_COMMAND_TIMEOUT_MS",
-			15000,
+			5000,
 			1000,
 		),
 		restartTimeoutMs: integer(
 			"ZEROTIER_RECOVERY_RESTART_TIMEOUT_MS",
-			30000,
+			5000,
 			1000,
 		),
 		networkIds,
