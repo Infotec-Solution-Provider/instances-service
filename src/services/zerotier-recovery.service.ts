@@ -95,7 +95,7 @@ export function readZeroTierRecoveryConfig(
 		enabled,
 		intervalMs: integer("ZEROTIER_RECOVERY_INTERVAL_MS", 30000, 1000),
 		failureThreshold: integer("ZEROTIER_RECOVERY_FAILURE_THRESHOLD", 3, 2),
-		cooldownMs: integer("ZEROTIER_RECOVERY_COOLDOWN_MS", 600000, 60000),
+		cooldownMs: integer("ZEROTIER_RECOVERY_COOLDOWN_MS", 5000, 60000),
 		startupGraceMs: integer(
 			"ZEROTIER_RECOVERY_STARTUP_GRACE_MS",
 			60000,
