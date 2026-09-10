@@ -1,4 +1,4 @@
-import { Pool, QueryResult } from "mysql2";
+import { Pool, PoolConnection, QueryResult } from "mysql2";
 
 class ClientPool {
 	public readonly name: string;
@@ -10,10 +10,11 @@ class ClientPool {
 	}
 
 	public async query(query: string, parameters: unknown) {
-		const queryResult = new Promise<QueryResult>(async (res, rej) => {
+		const queryResult = new Promise<QueryResult>((res, rej) => {
 			this.pool.query(query, parameters, (err, result) => {
 				if (err) {
 					rej(err);
+					return;
 				}
 
 				res(result);
@@ -26,15 +27,60 @@ class ClientPool {
 	/**
 	 * Verifica se a conexão está ativa executando uma query simples
 	 */
-	public async ping(): Promise<void> {
+	public async ping(timeoutMs = 10000): Promise<void> {
 		return new Promise<void>((resolve, reject) => {
-			this.pool.query("SELECT 1", (err) => {
-				if (err) {
-					reject(err);
+			let connection: PoolConnection | undefined;
+			let settled = false;
+			const finish = (error?: unknown) => {
+				if (settled) {
+					return;
+				}
+				settled = true;
+				clearTimeout(timer);
+				if (error) {
+					connection?.destroy();
+					reject(error);
 				} else {
+					connection?.release();
 					resolve();
 				}
-			});
+			};
+			// Include time spent waiting for a free connection in the deadline.
+			const timer = setTimeout(() => {
+				finish(
+					Object.assign(
+						new Error(`Health check timeout for ${this.name}`),
+						{
+							code: connection
+								? "POOL_HEALTH_CHECK_TIMEOUT"
+								: "POOL_HEALTH_CHECK_BUSY",
+						},
+					),
+				);
+			}, timeoutMs);
+
+			try {
+				this.pool.getConnection((error, acquiredConnection) => {
+					if (settled) {
+						acquiredConnection?.release();
+						return;
+					}
+					if (error) {
+						finish(error);
+						return;
+					}
+					connection = acquiredConnection;
+					try {
+						connection.query("SELECT 1", (queryError) => {
+							finish(queryError ?? undefined);
+						});
+					} catch (queryError) {
+						finish(queryError);
+					}
+				});
+			} catch (error) {
+				finish(error);
+			}
 		});
 	}
 

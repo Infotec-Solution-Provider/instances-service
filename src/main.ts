@@ -10,6 +10,7 @@ import PoolsController from "./controllers/pools.controller";
 import AuthController from "./controllers/auth.controller";
 import GeoController from "./controllers/geo.controller";
 import { Logger, logRoutes } from "@in.pulse-crm/utils";
+import { startZeroTierRecovery } from "./services/zerotier-recovery.service";
 
 const app = express();
 const appPort = Number(process.env["LISTEN_PORT"]) || 8000;
@@ -45,4 +46,7 @@ app.use((err: Error, req: Request, _res: Response, next: NextFunction) => {
 
 app.use(handleRequestError);
 
-app.listen(appPort, () => console.log(`App is running on port ${appPort}`));
+app.listen(appPort, () => {
+	console.log(`App is running on port ${appPort}`);
+	startZeroTierRecovery();
+});
