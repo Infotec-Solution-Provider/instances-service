@@ -24,7 +24,8 @@ Os pools MySQL continuam sendo recuperados pelo próprio health check, com um ú
 | `ZEROTIER_RECOVERY_NETWORK_IDS` | vazio | IDs de rede com 16 caracteres hexadecimais, separados por vírgula; vazio desativa a checagem de redes específicas. |
 | `ZEROTIER_RECOVERY_PROBE_TARGETS` | vazio | Destinos `host:porta`, separados por vírgula, com ao menos dois hosts distintos; prazo TCP de 5 segundos por destino. |
 | `ZEROTIER_CLI_PATH` | padrão da plataforma | Caminho absoluto do executável da CLI, sem argumentos. |
-| `ZEROTIER_RECOVERY_USE_SUDO` | `false` | Linux: executa as consultas e o reinício com `sudo -n`. |
+| `ZEROTIER_RECOVERY_USE_SUDO` | `false` | Linux: executa as consultas e o reinício com sudo. Sem senha configurada, usa `sudo -n`. |
+| `ZEROTIER_RECOVERY_SUDO_PASSWORD` | vazio | Linux com sudo habilitado: senha enviada pela entrada padrão com `sudo -S -p ''`; não entra nos argumentos nem nos logs do monitor. Vazia mantém o modo sem senha. |
 
 Os valores numéricos são inteiros: mínimo de 2 falhas e 5000 ms nos tempos; máximo de 2147483647. Uma configuração inválida desativa somente o monitor e gera um log, sem impedir a inicialização da API. A tabela mostra os padrões do código quando as variáveis estão ausentes; `.env.example` define explicitamente tempos maiores.
 
@@ -32,26 +33,59 @@ Use somente um monitor por host. No PM2, processos com `NODE_APP_INSTANCE` difer
 
 ### Permissões e ativação
 
-No Linux, o processo precisa consultar a CLI e executar `systemctl restart zerotier-one`, comando indicado nas [instruções oficiais de recuperação](https://docs.zerotier.com/faq/emergencyinstructions/). Para um usuário sem privilégios, habilite `ZEROTIER_RECOVERY_USE_SUDO=true` e autorize somente os comandos exatos em sudoers, sem senha e sem curingas. Não conceda sudo irrestrito ao usuário do Node.
+No Linux, o processo precisa consultar a CLI e executar `systemctl restart zerotier-one`, comando indicado nas [instruções oficiais de recuperação](https://docs.zerotier.com/faq/emergencyinstructions/). Para executar esses comandos com sudo, habilite `ZEROTIER_RECOVERY_USE_SUDO=true` e escolha uma das formas de autenticação abaixo. A conta do processo precisa já ter autorização no sudoers para os três comandos; guardar a senha não concede essa autorização.
 
-Os caminhos usados são `/usr/sbin/zerotier-cli`, `/usr/bin/systemctl` e `/usr/bin/sudo`. Se a CLI estiver em outro caminho, ajuste `ZEROTIER_CLI_PATH` e a regra correspondente. Exemplo para editar com `visudo`, substituindo `instances` pelo usuário real do processo:
+Os caminhos usados são `/usr/sbin/zerotier-cli`, `/usr/bin/systemctl` e `/usr/bin/sudo`. Se a CLI estiver em outro caminho, ajuste `ZEROTIER_CLI_PATH` e qualquer regra de sudoers correspondente. Confirme que os executáveis autorizados e seus diretórios são administrados por root.
+
+**Com senha armazenada:** edite o `.env` local do servidor e configure os valores abaixo. Substitua o marcador pela senha usada no sudo pela conta do processo, por exemplo `inpulse`. Faça a edição em um editor, sem colocar a senha em comandos do shell ou enviá-la pelo chat.
+
+```dotenv
+ZEROTIER_RECOVERY_ENABLED=true
+ZEROTIER_RECOVERY_USE_SUDO=true
+ZEROTIER_RECOVERY_SUDO_PASSWORD="SUA_SENHA_LOCAL"
+ZEROTIER_CLI_PATH=/usr/sbin/zerotier-cli
+```
+
+A senha é enviada somente pela entrada padrão para as consultas e o reinício, com `sudo -S -p ''`, sem aparecer nos argumentos ou logs do monitor. O valor lido do ambiente preserva espaços e caracteres; use a sintaxe de aspas do `.env` para preservar `#` e espaços nas extremidades. Quebras de linha (CR/LF) e NUL não são aceitos na senha e desativam o monitor quando Linux e sudo estão ativos. A senha é ignorada fora desse modo. Não versione o `.env` nem publique seu conteúdo. No diretório da aplicação, como proprietário do arquivo, restrinja a leitura:
+
+```sh
+chmod 600 .env
+```
+
+O uso de `-S` para ler a senha pela entrada padrão está descrito no [manual do sudo](https://github.com/sudo-project/sudo/blob/main/docs/sudo.man.in). A variável da senha é removida do ambiente dos subprocessos lançados pelo monitor. Senha incorreta, falha de autorização ou PAM bloqueiam o reinício. No modo com senha, uma consulta expirada também bloqueia o reinício, pois o timeout pode ter ocorrido durante a autenticação; uma falha explícita de conexão com o daemon continua recuperável.
+
+Antes de habilitar, valide as consultas com o mesmo usuário do processo; estes comandos pedem a senha no terminal:
+
+```sh
+sudo /usr/sbin/zerotier-cli -j info
+sudo /usr/sbin/zerotier-cli -j listnetworks
+```
+
+**Sem senha armazenada:** deixe `ZEROTIER_RECOVERY_SUDO_PASSWORD` ausente ou vazia. O monitor mantém `sudo -n`, que exige autorização sem senha. Para configurar essa alternativa, edite com `visudo` uma regra limitada aos comandos exatos, sem curingas, substituindo `instances` pelo usuário real do processo:
 
 ```sudoers
 instances ALL=(root) NOPASSWD: /usr/sbin/zerotier-cli -j info, /usr/sbin/zerotier-cli -j listnetworks, /usr/bin/systemctl restart zerotier-one
 ```
 
-Confirme que os executáveis autorizados e seus diretórios são administrados por root. Antes de habilitar, valide as consultas com o mesmo usuário do processo:
+Valide essa alternativa sem usar senha em cache:
 
 ```sh
-sudo -n /usr/sbin/zerotier-cli -j info
-sudo -n /usr/sbin/zerotier-cli -j listnetworks
+sudo -k -n /usr/sbin/zerotier-cli -j info
+sudo -k -n /usr/sbin/zerotier-cli -j listnetworks
 ```
 
 Se aparecer `reinicio bloqueado`, o diagnóstico não autorizou uma tentativa de reinício. Os logs distinguem CLI ausente, sudo ausente, execução sem permissão, autenticação local e falha do sudo. O mesmo bloqueio é registrado no máximo uma vez por minuto; as verificações continuam no intervalo configurado. Mudanças de motivo e retorno à saúde são registrados imediatamente na próxima verificação.
 
 Para investigar no servidor, execute os comandos acima com o usuário do PM2 (por exemplo, `inpulse`) e o caminho de `ZEROTIER_CLI_PATH`. Uma regra que libera apenas `zerotier-cli info` não libera necessariamente os argumentos usados pelo monitor, `zerotier-cli -j info`. Se a CLI funcionar com sudo, mas o monitor acusar autenticação, confira `ZEROTIER_RECOVERY_USE_SUDO=true` no ambiente do processo. Não publique o conteúdo de `authtoken.secret` nem o `.env` completo. `Error connecting to the ZeroTier service` indica falha de conexão com o daemon e é classificado separadamente como recuperável.
 
-Depois de corrigir o ambiente, use `pm2 restart instances --update-env`, substituindo `instances` pelo nome real da aplicação. O [PM2 exige `--update-env` para atualizar variáveis fornecidas pela CLI](https://pm2.io/docs/runtime/best-practices/environment-variables/); confira também a origem das variáveis, pois valores já presentes no processo têm precedência sobre o `.env` carregado pelo aplicativo. O erro isolado de uma rota `/query` precisa do erro completo para ser atribuído ao ZeroTier.
+Depois de publicar o código atualizado e configurar o `.env` no servidor, execute no diretório da aplicação, substituindo `instances` pelo nome real da aplicação:
+
+```sh
+npm run build
+pm2 restart instances --update-env
+```
+
+O [PM2 exige `--update-env` para atualizar variáveis fornecidas pela CLI](https://pm2.io/docs/runtime/best-practices/environment-variables/). Valores já presentes no ambiente do PM2 têm precedência sobre o `.env` carregado pelo aplicativo; se houver valores antigos, corrija-os na configuração que os fornece. Não coloque a senha diretamente no comando de reinício. O erro isolado de uma rota `/query` precisa do erro completo para ser atribuído ao ZeroTier.
 
 No Windows, o caminho padrão é `C:\Program Files (x86)\ZeroTier\One\zerotier-one_x64.exe`; ajuste `ZEROTIER_CLI_PATH` conforme a instalação. A conta do processo precisa acessar a CLI e ter permissão para reiniciar `ZeroTierOneService`, nome confirmado na [documentação do serviço](https://docs.zerotier.com/faq/noservice/). A opção de sudo se aplica somente ao Linux. O executável do ZeroTier é chamado diretamente em modo CLI (`-q -j info` e, quando necessário, `-q -j listnetworks`), sem arquivo `.bat`.
 

@@ -935,3 +935,296 @@ test("entry point contains invalid configuration errors without breaking service
 	assert.equal(logged.length, 1);
 	assert.match(logged[0].join(" "), /configuracao invalida/);
 });
+
+const SUDO_TEST_PASSWORD = "  private-sudo-secret $() '\"; \\ ç\t  ";
+
+test("sudo password configuration preserves nonempty values and treats absent or empty values as unset", () => {
+	for (const password of [undefined, "", "   ", SUDO_TEST_PASSWORD]) {
+		const settings = readZeroTierRecoveryConfig(
+			{
+				ZEROTIER_RECOVERY_ENABLED: "true",
+				ZEROTIER_RECOVERY_USE_SUDO: "true",
+				ZEROTIER_RECOVERY_SUDO_PASSWORD: password,
+			},
+			"linux",
+		);
+		assert.equal(settings.sudoPassword, password || undefined);
+	}
+});
+
+test("sudo password control characters are rejected only for enabled Linux sudo without exposing their value", () => {
+	for (const control of ["\r", "\n", "\0"]) {
+		const env = {
+			ZEROTIER_RECOVERY_ENABLED: "true",
+			ZEROTIER_RECOVERY_USE_SUDO: "true",
+			ZEROTIER_RECOVERY_SUDO_PASSWORD: `${SUDO_TEST_PASSWORD}${control}suffix`,
+		};
+		assert.throws(
+			() => readZeroTierRecoveryConfig(env, "linux"),
+			(error) => {
+				assert.match(error.message, /ZEROTIER_RECOVERY_SUDO_PASSWORD/);
+				assert.ok(!error.message.includes("private-sudo-secret"));
+				assert.ok(!error.message.includes(control));
+				return true;
+			},
+		);
+		for (const [platform, enabled, useSudo] of [
+			["linux", "false", "true"],
+			["linux", "true", "false"],
+			["win32", "true", "true"],
+		]) {
+			assert.doesNotThrow(() =>
+				readZeroTierRecoveryConfig(
+					{
+						...env,
+						ZEROTIER_RECOVERY_ENABLED: enabled,
+						ZEROTIER_RECOVERY_USE_SUDO: useSudo,
+					},
+					platform,
+				),
+			);
+		}
+	}
+});
+
+test("Linux sudo sends a configured password only through stdin for info, listnetworks and restart", async () => {
+	const commandCalls = [];
+	const settings = config({
+		useSudo: true,
+		sudoPassword: SUDO_TEST_PASSWORD,
+		cliPath: "/opt/ZeroTier custom/zerotier-cli",
+		networkIds: [NETWORK_A],
+	});
+	const dependencies = createZeroTierDependencies(
+		settings,
+		"linux",
+		async (...command) => {
+			commandCalls.push(command);
+			return JSON.stringify(
+				command[1].at(-1) === "listnetworks"
+					? [{ id: NETWORK_A, status: "OK" }]
+					: { online: true },
+			);
+		},
+	);
+	assert.deepEqual(await dependencies.check(), { healthy: true });
+	await dependencies.restart();
+	assert.deepEqual(commandCalls, [
+		[
+			"/usr/bin/sudo",
+			["-S", "-p", "", settings.cliPath, "-j", "info"],
+			settings.commandTimeoutMs,
+			`${SUDO_TEST_PASSWORD}\n`,
+		],
+		[
+			"/usr/bin/sudo",
+			["-S", "-p", "", settings.cliPath, "-j", "listnetworks"],
+			settings.commandTimeoutMs,
+			`${SUDO_TEST_PASSWORD}\n`,
+		],
+		[
+			"/usr/bin/sudo",
+			["-S", "-p", "", "/usr/bin/systemctl", "restart", "zerotier-one"],
+			settings.restartTimeoutMs,
+			`${SUDO_TEST_PASSWORD}\n`,
+		],
+	]);
+	assert.ok(
+		commandCalls.every(([file, args]) =>
+			[file, ...args].every(
+				(argument) => !argument.includes(SUDO_TEST_PASSWORD),
+			),
+		),
+	);
+});
+
+test("Linux sudo without a password preserves -n and exactly three runner arguments", async () => {
+	for (const sudoPassword of [undefined, ""]) {
+		const commandCalls = [];
+		const settings = config({
+			useSudo: true,
+			sudoPassword,
+			networkIds: [NETWORK_A],
+		});
+		const dependencies = createZeroTierDependencies(
+			settings,
+			"linux",
+			async (...command) => {
+				commandCalls.push(command);
+				return JSON.stringify(
+					command[1].at(-1) === "listnetworks"
+						? [{ id: NETWORK_A, status: "OK" }]
+						: { online: true },
+				);
+			},
+		);
+		assert.deepEqual(await dependencies.check(), { healthy: true });
+		await dependencies.restart();
+		assert.deepEqual(commandCalls, [
+			[
+				"/usr/bin/sudo",
+				["-n", settings.cliPath, "-j", "info"],
+				settings.commandTimeoutMs,
+			],
+			[
+				"/usr/bin/sudo",
+				["-n", settings.cliPath, "-j", "listnetworks"],
+				settings.commandTimeoutMs,
+			],
+			[
+				"/usr/bin/sudo",
+				["-n", "/usr/bin/systemctl", "restart", "zerotier-one"],
+				settings.restartTimeoutMs,
+			],
+		]);
+	}
+});
+
+test("configured sudo passwords are not transmitted without Linux sudo", async () => {
+	for (const [platform, useSudo] of [
+		["linux", false],
+		["win32", false],
+		["win32", true],
+	]) {
+		const commandCalls = [];
+		const settings = config({
+			useSudo,
+			sudoPassword: SUDO_TEST_PASSWORD,
+			networkIds: [NETWORK_A],
+		});
+		const dependencies = createZeroTierDependencies(
+			settings,
+			platform,
+			async (...command) => {
+				commandCalls.push(command);
+				return JSON.stringify(
+					command[1].at(-1) === "listnetworks"
+						? [{ id: NETWORK_A, status: "OK" }]
+						: { online: true },
+				);
+			},
+		);
+		assert.deepEqual(await dependencies.check(), { healthy: true });
+		await dependencies.restart();
+		assert.equal(commandCalls.length, 3);
+		for (const command of commandCalls) {
+			assert.equal(
+				command.length,
+				3,
+				"no password stdin argument may be supplied",
+			);
+			assert.notEqual(command[0], "/usr/bin/sudo");
+			assert.ok(
+				[command[0], ...command[1]].every(
+					(argument) => !argument.includes(SUDO_TEST_PASSWORD),
+				),
+			);
+		}
+		assert.deepEqual(commandCalls[0][1], [
+			...(platform === "win32" ? ["-q"] : []),
+			"-j",
+			"info",
+		]);
+	}
+});
+
+for (const [name, error, restartAllowed] of [
+	[
+		"wrong password",
+		{
+			stderr: `Sorry, try again. sudo: 1 incorrect password attempt ${SUDO_TEST_PASSWORD}`,
+		},
+		false,
+	],
+	[
+		"sudo command denied",
+		{
+			stderr: `sudo: user is not allowed to execute ${SUDO_TEST_PASSWORD}`,
+		},
+		false,
+	],
+	[
+		"PAM error with connection output",
+		{
+			stderr: `PAM account management error: ${SUDO_TEST_PASSWORD}`,
+			stdout: "connection refused",
+		},
+		false,
+	],
+	[
+		"authentication failure with connection output",
+		{
+			stderr: `Authentication failure: ${SUDO_TEST_PASSWORD}`,
+			stdout: "connection refused",
+		},
+		false,
+	],
+	["unknown command timeout", { killed: true }, false],
+	[
+		"command timeout with connection output",
+		{
+			killed: true,
+			stdout: `Error connecting to the ZeroTier service: connection refused ${SUDO_TEST_PASSWORD}`,
+		},
+		false,
+	],
+	[
+		"daemon connection refused",
+		{
+			stdout: `Error connecting to the ZeroTier service: connection refused ${SUDO_TEST_PASSWORD}`,
+		},
+		true,
+	],
+]) {
+	test(`password mode ${name} ${restartAllowed ? "allows" : "blocks"} recovery without leaking the password`, async () => {
+		for (const failedCommand of ["info", "listnetworks"]) {
+			const settings = config({
+				useSudo: true,
+				sudoPassword: SUDO_TEST_PASSWORD,
+				networkIds: [NETWORK_A],
+			});
+			const dependencies = createZeroTierDependencies(
+				settings,
+				"linux",
+				async (_file, args) => {
+					if (args.at(-1) === failedCommand) throw error;
+					return JSON.stringify({ online: true });
+				},
+			);
+			const result = await dependencies.check();
+			assert.equal(result.healthy, false);
+			assert.equal(result.restartAllowed, restartAllowed, failedCommand);
+			assert.ok(!result.reason.includes("private-sudo-secret"));
+			const { service, calls } = monitor(settings, {
+				check: dependencies.check,
+			});
+			await checks(service, settings.failureThreshold);
+			assert.equal(calls.restarts, restartAllowed ? 1 : 0, failedCommand);
+			assert.ok(
+				calls.logs.every(
+					(message) => !message.includes("private-sudo-secret"),
+				),
+			);
+		}
+	});
+}
+
+test("command timeouts retain existing recovery behavior when password authentication is unused", async () => {
+	for (const [platform, useSudo, sudoPassword] of [
+		["linux", true, undefined],
+		["linux", true, ""],
+		["linux", false, SUDO_TEST_PASSWORD],
+		["win32", true, SUDO_TEST_PASSWORD],
+	]) {
+		const dependencies = createZeroTierDependencies(
+			config({ useSudo, sudoPassword }),
+			platform,
+			async () => {
+				throw { killed: true };
+			},
+		);
+		const result = await dependencies.check();
+		assert.equal(result.healthy, false);
+		assert.equal(result.restartAllowed, true);
+	}
+});

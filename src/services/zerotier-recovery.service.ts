@@ -18,6 +18,7 @@ export interface ZeroTierRecoveryConfig {
 	probeTargets: ProbeTarget[];
 	cliPath: string;
 	useSudo: boolean;
+	sudoPassword?: string;
 }
 
 export type HealthResult =
@@ -36,6 +37,20 @@ export function readZeroTierRecoveryConfig(
 	platform = process.platform,
 ): ZeroTierRecoveryConfig {
 	const enabled = env["ZEROTIER_RECOVERY_ENABLED"] === "true";
+	const useSudo = env["ZEROTIER_RECOVERY_USE_SUDO"] === "true";
+	// Nao remover espacos: eles podem fazer parte da senha.
+	const sudoPassword = env["ZEROTIER_RECOVERY_SUDO_PASSWORD"] || undefined;
+	if (
+		enabled &&
+		platform === "linux" &&
+		useSudo &&
+		sudoPassword !== undefined &&
+		/[\r\n\0]/.test(sudoPassword)
+	) {
+		throw new Error(
+			"ZEROTIER_RECOVERY_SUDO_PASSWORD nao pode conter CR, LF ou NUL",
+		);
+	}
 	const integer = (key: string, fallback: number, minimum: number) => {
 		const raw = env[key]?.trim();
 		const value = raw ? Number(raw) : fallback;
@@ -118,7 +133,8 @@ export function readZeroTierRecoveryConfig(
 			(platform === "win32"
 				? "C:\\Program Files (x86)\\ZeroTier\\One\\zerotier-one_x64.exe"
 				: "/usr/sbin/zerotier-cli"),
-		useSudo: env["ZEROTIER_RECOVERY_USE_SUDO"] === "true",
+		useSudo,
+		...(sudoPassword !== undefined ? { sudoPassword } : {}),
 	};
 }
 
@@ -126,11 +142,19 @@ export type CommandRunner = (
 	file: string,
 	args: string[],
 	timeout: number,
+	input?: string,
 ) => Promise<string>;
 
-const runCommand: CommandRunner = (file, args, timeout) =>
+const runCommand: CommandRunner = (file, args, timeout, input) =>
 	new Promise((resolve, reject) => {
-		execFile(
+		// A senha segue apenas pelo stdin do sudo, nunca pelo ambiente dos filhos.
+		const env = { ...process.env };
+		for (const key of Object.keys(env)) {
+			if (key.toUpperCase() === "ZEROTIER_RECOVERY_SUDO_PASSWORD")
+				delete env[key];
+		}
+		let stdinFailed = false;
+		const child = execFile(
 			file,
 			args,
 			{
@@ -138,15 +162,30 @@ const runCommand: CommandRunner = (file, args, timeout) =>
 				windowsHide: true,
 				maxBuffer: 1024 * 1024,
 				encoding: "utf8",
+				env,
 			},
 			(error, stdout, stderr) => {
 				if (error) {
 					reject(Object.assign(error, { stdout, stderr }));
+				} else if (stdinFailed) {
+					reject(new Error("falha ao fornecer entrada ao sudo"));
 				} else {
 					resolve(stdout);
 				}
 			},
 		);
+		if (input !== undefined) {
+			if (child.stdin) {
+				child.stdin.on("error", (error: NodeJS.ErrnoException) => {
+					// Sudo pode encerrar sem ler stdin (credencial em cache ou comando negado).
+					// EPIPE nao substitui o resultado do processo nem derruba a API.
+					if (error.code !== "EPIPE") stdinFailed = true;
+				});
+				child.stdin.end(input);
+			} else {
+				stdinFailed = true;
+			}
+		}
 	});
 
 export function probeTcp(
@@ -166,7 +205,11 @@ export function probeTcp(
 	});
 }
 
-function diagnosticFailure(error: unknown, useSudo: boolean): HealthResult {
+function diagnosticFailure(
+	error: unknown,
+	useSudo: boolean,
+	usesPassword: boolean,
+): HealthResult {
 	const failure = error as {
 		code?: string | number;
 		killed?: boolean;
@@ -195,7 +238,10 @@ function diagnosticFailure(error: unknown, useSudo: boolean): HealthResult {
 				: "sem permissao para executar a CLI; verificar executavel e diretorios",
 		);
 	}
-	if (/authtoken|authentication/i.test(output)) {
+	if (
+		/authtoken/i.test(output) ||
+		(!usesPassword && /authentication/i.test(output))
+	) {
 		return blocked(
 			"autenticacao local da CLI falhou; verificar acesso ao token e usuario do processo" +
 				(useSudo
@@ -210,9 +256,20 @@ function diagnosticFailure(error: unknown, useSudo: boolean): HealthResult {
 			"CLI nao encontrada pelo sudo; verificar ZEROTIER_CLI_PATH e instalacao do ZeroTier",
 		);
 	}
-	if (/sudo:|password|not allowed/i.test(output)) {
+	if (
+		/sudo:|password|not allowed|authentication|sorry, try again|\bPAM\b/i.test(
+			output,
+		)
+	) {
 		return blocked(
-			"sudo ou autorizacao da CLI falhou; verificar sudo -n e regra NOPASSWD para os argumentos exatos -j info e -j listnetworks",
+			usesPassword
+				? "senha ou autorizacao do sudo falhou; verificar ZEROTIER_RECOVERY_SUDO_PASSWORD e permissoes do usuario"
+				: "sudo ou autorizacao da CLI falhou; verificar sudo -n e regra NOPASSWD para os argumentos exatos -j info e -j listnetworks",
+		);
+	}
+	if (usesPassword && failure?.killed) {
+		return blocked(
+			"consulta via sudo com senha expirou; verificar autenticacao e daemon local",
 		);
 	}
 	if (/permission|access denied/i.test(output)) {
@@ -245,16 +302,27 @@ export function createZeroTierDependencies(
 	run: CommandRunner = runCommand,
 	probe: (target: ProbeTarget) => Promise<boolean> = probeTcp,
 ): RecoveryDependencies {
+	const useSudo = platform === "linux" && config.useSudo;
+	const usesPassword = useSudo && Boolean(config.sudoPassword);
+	const runLocal = (file: string, args: string[], timeout: number) => {
+		if (!useSudo) return run(file, args, timeout);
+		if (usesPassword) {
+			return run(
+				"/usr/bin/sudo",
+				["-S", "-p", "", file, ...args],
+				timeout,
+				`${config.sudoPassword}\n`,
+			);
+		}
+		return run("/usr/bin/sudo", ["-n", file, ...args], timeout);
+	};
 	const cli = async (command: string): Promise<unknown> => {
 		const args = [...(platform === "win32" ? ["-q"] : []), "-j", command];
-		const output =
-			platform === "linux" && config.useSudo
-				? await run(
-						"/usr/bin/sudo",
-						["-n", config.cliPath, ...args],
-						config.commandTimeoutMs,
-					)
-				: await run(config.cliPath, args, config.commandTimeoutMs);
+		const output = await runLocal(
+			config.cliPath,
+			args,
+			config.commandTimeoutMs,
+		);
 		return JSON.parse(output) as unknown;
 	};
 	return {
@@ -332,28 +400,17 @@ export function createZeroTierDependencies(
 				}
 				return { healthy: true };
 			} catch (error) {
-				return diagnosticFailure(
-					error,
-					platform === "linux" && config.useSudo,
-				);
+				return diagnosticFailure(error, useSudo, usesPassword);
 			}
 		},
 		restart: async () => {
 			if (platform === "linux") {
 				const args = ["restart", "zerotier-one"];
-				if (config.useSudo) {
-					await run(
-						"/usr/bin/sudo",
-						["-n", "/usr/bin/systemctl", ...args],
-						config.restartTimeoutMs,
-					);
-				} else {
-					await run(
-						"/usr/bin/systemctl",
-						args,
-						config.restartTimeoutMs,
-					);
-				}
+				await runLocal(
+					"/usr/bin/systemctl",
+					args,
+					config.restartTimeoutMs,
+				);
 			} else if (platform === "win32") {
 				await run(
 					"powershell.exe",
