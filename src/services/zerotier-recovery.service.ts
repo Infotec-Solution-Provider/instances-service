@@ -166,7 +166,7 @@ export function probeTcp(
 	});
 }
 
-function diagnosticFailure(error: unknown): HealthResult {
+function diagnosticFailure(error: unknown, useSudo: boolean): HealthResult {
 	const failure = error as {
 		code?: string | number;
 		killed?: boolean;
@@ -176,18 +176,49 @@ function diagnosticFailure(error: unknown): HealthResult {
 	// A CLI publica erros de conexao em stdout e erros de autenticacao em stderr.
 	const output = `${failure?.stderr || ""}\n${failure?.stdout || ""}`;
 	// Permissoes/configuracao nao sao corrigidas reiniciando a rede. Nao registrar tokens/saida bruta.
+	const blocked = (reason: string): HealthResult => ({
+		healthy: false,
+		restartAllowed: false,
+		reason,
+	});
+	if (failure?.code === "ENOENT") {
+		return blocked(
+			useSudo
+				? "sudo nao encontrado em /usr/bin/sudo; verificar instalacao"
+				: "CLI nao encontrada; verificar ZEROTIER_CLI_PATH e instalacao do ZeroTier",
+		);
+	}
+	if (failure?.code === "EACCES") {
+		return blocked(
+			useSudo
+				? "sem permissao para executar /usr/bin/sudo; verificar executavel e diretorios"
+				: "sem permissao para executar a CLI; verificar executavel e diretorios",
+		);
+	}
+	if (/authtoken|authentication/i.test(output)) {
+		return blocked(
+			"autenticacao local da CLI falhou; verificar acesso ao token e usuario do processo" +
+				(useSudo
+					? " (sudo habilitado)"
+					: "; conferir ZEROTIER_RECOVERY_USE_SUDO no Linux"),
+		);
+	}
 	if (
-		/authtoken|authentication|permission|access denied|not allowed|password|sudo:/i.test(
-			output,
-		) ||
-		failure?.code === "ENOENT" ||
-		failure?.code === "EACCES"
+		/sudo:.*(?:command not found|no such file or directory)/i.test(output)
 	) {
-		return {
-			healthy: false,
-			restartAllowed: false,
-			reason: "CLI indisponivel ou sem permissao; verificar caminho, token local e sudo",
-		};
+		return blocked(
+			"CLI nao encontrada pelo sudo; verificar ZEROTIER_CLI_PATH e instalacao do ZeroTier",
+		);
+	}
+	if (/sudo:|password|not allowed/i.test(output)) {
+		return blocked(
+			"sudo ou autorizacao da CLI falhou; verificar sudo -n e regra NOPASSWD para os argumentos exatos -j info e -j listnetworks",
+		);
+	}
+	if (/permission|access denied/i.test(output)) {
+		return blocked(
+			"CLI sem permissao; verificar usuario do processo, acesso ao token e configuracao de sudo",
+		);
 	}
 	if (
 		failure?.killed ||
@@ -301,7 +332,10 @@ export function createZeroTierDependencies(
 				}
 				return { healthy: true };
 			} catch (error) {
-				return diagnosticFailure(error);
+				return diagnosticFailure(
+					error,
+					platform === "linux" && config.useSudo,
+				);
 			}
 		},
 		restart: async () => {
@@ -349,6 +383,7 @@ export class ZeroTierRecoveryService {
 	private failures = 0;
 	private lastRestartAt: number | undefined;
 	private waitingForRecovery = false;
+	private lastBlockedLog: { reason: string; at: number } | undefined;
 
 	constructor(
 		private readonly config: ZeroTierRecoveryConfig,
@@ -362,6 +397,7 @@ export class ZeroTierRecoveryService {
 		this.started = true;
 		this.stopped = false;
 		this.generation++;
+		this.lastBlockedLog = undefined;
 		this.dependencies.log(
 			"monitor habilitado; aguardando periodo inicial de estabilizacao",
 		);
@@ -397,19 +433,35 @@ export class ZeroTierRecoveryService {
 			const health = await this.dependencies.check();
 			if (this.stopped || generation !== this.generation) return;
 			if (health.healthy) {
-				if (this.failures || this.waitingForRecovery)
+				if (
+					this.failures ||
+					this.waitingForRecovery ||
+					this.lastBlockedLog
+				)
 					this.dependencies.log(
 						"conectividade verificada; monitor saudavel",
 					);
 				this.failures = 0;
 				this.waitingForRecovery = false;
+				this.lastBlockedLog = undefined;
 				return;
 			}
 			if (!health.restartAllowed) {
 				this.failures = 0;
-				this.dependencies.log(`reinicio bloqueado: ${health.reason}`);
+				const now = this.dependencies.now();
+				// Manter as verificacoes ativas, mas repetir o mesmo bloqueio no maximo uma vez por minuto.
+				if (
+					this.lastBlockedLog?.reason !== health.reason ||
+					now - this.lastBlockedLog.at >= 60000
+				) {
+					this.dependencies.log(
+						`reinicio bloqueado: ${health.reason}`,
+					);
+					this.lastBlockedLog = { reason: health.reason, at: now };
+				}
 				return;
 			}
+			this.lastBlockedLog = undefined;
 			this.failures++;
 			this.dependencies.log(
 				`falha ${this.failures}/${this.config.failureThreshold}: ${health.reason}`,
@@ -444,6 +496,7 @@ export class ZeroTierRecoveryService {
 			}
 		} catch {
 			this.failures = 0;
+			this.lastBlockedLog = undefined;
 			this.dependencies.log(
 				"erro inesperado no monitor; nenhum reinicio solicitado",
 			);

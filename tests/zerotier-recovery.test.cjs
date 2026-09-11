@@ -242,6 +242,96 @@ test("nonrecoverable diagnostics reset prior recoverable failures", async () => 
 	assert.equal(calls.restarts, 1);
 });
 
+test("identical blocked diagnostics keep checking and repeat their log only once per minute regardless of restart cooldown", async () => {
+	const { service, calls, setNow, setHealth } = monitor({ cooldownMs: 5000 });
+	setHealth({
+		healthy: false,
+		restartAllowed: false,
+		reason: "CLI unavailable",
+	});
+	const rounds = [
+		[0, 1],
+		[5000, 1],
+		[10000, 1],
+		[59999, 1],
+		[60000, 2],
+		[60000, 2],
+		[119999, 2],
+		[120000, 3],
+	];
+	for (const [now, expectedLogs] of rounds) {
+		setNow(now);
+		await service.checkNow();
+		assert.equal(calls.logs.length, expectedLogs, `log count at ${now} ms`);
+	}
+	assert.equal(calls.checks, rounds.length);
+	assert.equal(calls.restarts, 0);
+	assert.ok(
+		calls.logs.every((message) => message.includes("reinicio bloqueado")),
+	);
+});
+
+test("changed blocks and recurring blocks after health transitions log immediately and recovery is announced once", async () => {
+	const { service, calls, setHealth } = monitor();
+	const blocked = {
+		healthy: false,
+		restartAllowed: false,
+		reason: "CLI unavailable",
+	};
+	const blockedLogs = () =>
+		calls.logs.filter((message) => message.includes("reinicio bloqueado"));
+	setHealth(blocked);
+	await checks(service, 2);
+	assert.equal(blockedLogs().length, 1);
+	setHealth({ ...blocked, reason: "sudo unavailable" });
+	await service.checkNow();
+	assert.equal(blockedLogs().length, 2);
+	assert.match(blockedLogs().at(-1), /sudo unavailable/);
+	setHealth({ healthy: true });
+	await checks(service, 2);
+	assert.equal(
+		calls.logs.filter((message) =>
+			message.includes("conectividade verificada"),
+		).length,
+		1,
+	);
+	setHealth({ ...blocked, reason: "sudo unavailable" });
+	await service.checkNow();
+	assert.equal(blockedLogs().length, 3);
+	setHealth(unhealthy);
+	await service.checkNow();
+	setHealth({ ...blocked, reason: "sudo unavailable" });
+	await service.checkNow();
+	assert.equal(blockedLogs().length, 4);
+	assert.equal(calls.restarts, 0);
+});
+
+test("a new start clears blocked log suppression while repeated start stays idempotent", async (t) => {
+	t.mock.method(global, "setTimeout", () => ({ unref() {} }));
+	t.mock.method(global, "clearTimeout", () => {});
+	const { service, calls, setHealth } = monitor();
+	t.after(() => service.stop());
+	setHealth({
+		healthy: false,
+		restartAllowed: false,
+		reason: "CLI unavailable",
+	});
+	const blockedLogs = () =>
+		calls.logs.filter((message) => message.includes("reinicio bloqueado"));
+	await service.checkNow();
+	service.start();
+	await service.checkNow();
+	assert.equal(blockedLogs().length, 2);
+	service.start();
+	await service.checkNow();
+	assert.equal(blockedLogs().length, 2);
+	service.stop();
+	service.start();
+	await service.checkNow();
+	assert.equal(blockedLogs().length, 3);
+	assert.equal(calls.restarts, 0);
+});
+
 for (const restartFails of [false, true]) {
 	test(`restart cooldown survives ${restartFails ? "a failed" : "a successful"} restart, including a first attempt at time zero`, async () => {
 		let attempts = 0;
@@ -367,34 +457,98 @@ for (const [name, info, healthy, restartAllowed] of [
 	});
 }
 
-for (const [name, error, restartAllowed] of [
-	["missing CLI", { code: "ENOENT" }, false],
-	["executable access denied", { code: "EACCES" }, false],
+for (const [name, error, restartAllowed, expectedReason, useSudo = false] of [
+	["missing CLI", { code: "ENOENT" }, false, /CLI nao encontrada/],
+	["missing sudo", { code: "ENOENT" }, false, /sudo nao encontrado/, true],
+	[
+		"executable access denied",
+		{ code: "EACCES" },
+		false,
+		/sem permissao para executar/,
+	],
+	[
+		"sudo executable access denied",
+		{ code: "EACCES" },
+		false,
+		/sem permissao para executar/,
+		true,
+	],
+	[
+		"sudo cannot find the configured CLI",
+		{
+			stderr: "sudo: /private/zerotier-cli: command not found; confidential contents",
+		},
+		false,
+		/CLI nao encontrada/,
+		true,
+	],
 	[
 		"missing authtoken",
 		{ stderr: "authtoken.secret not found: confidential contents" },
 		false,
+		/autenticacao local/,
 	],
 	[
 		"authentication denied",
 		{ stderr: "authentication failed: confidential contents" },
 		false,
+		/autenticacao local/,
 	],
-	["sudo needs password", { stderr: "sudo: a password is required" }, false],
+	[
+		"sudo needs password",
+		{ stderr: "sudo: a password is required; confidential contents" },
+		false,
+		/sudo/,
+		true,
+	],
+	[
+		"sudo disallows the command",
+		{
+			stderr: "sudo: user is not allowed to execute; confidential contents",
+		},
+		false,
+		/sudo/,
+		true,
+	],
+	[
+		"unrecognized sudo failure",
+		{ stderr: "sudo: unexpected error; confidential contents" },
+		false,
+		/sudo/,
+		true,
+	],
+	[
+		"local token failure with sudo context",
+		{
+			stderr: "sudo: authtoken.secret permission denied; confidential contents",
+		},
+		false,
+		/autenticacao local/,
+		true,
+	],
 	[
 		"permission failure with timeout",
 		{ killed: true, stderr: "permission denied" },
 		false,
+		/permissao/,
+	],
+	[
+		"access denied",
+		{ stdout: "access denied; confidential contents" },
+		false,
+		/permissao/,
 	],
 	[
 		"stdout auth error",
 		{ stdout: "authtoken.secret missing: confidential contents" },
 		false,
+		/autenticacao local/,
 	],
 	[
 		"stderr auth error plus stdout connection failure",
 		{ stderr: "authentication denied", stdout: "connection refused" },
 		false,
+		/autenticacao local/,
 	],
 	[
 		"unrecognized failure",
@@ -420,7 +574,7 @@ for (const [name, error, restartAllowed] of [
 ]) {
 	test(`${name} ${restartAllowed ? "allows" : "blocks"} restart without exposing raw diagnostics`, async () => {
 		const dependencies = createZeroTierDependencies(
-			config(),
+			config({ useSudo }),
 			"linux",
 			async () => {
 				throw error;
@@ -429,6 +583,7 @@ for (const [name, error, restartAllowed] of [
 		const result = await dependencies.check();
 		assert.equal(result.healthy, false);
 		assert.equal(result.restartAllowed, restartAllowed);
+		if (expectedReason) assert.match(result.reason, expectedReason);
 		assert.ok(!result.reason.includes("confidential contents"));
 	});
 }
@@ -578,6 +733,16 @@ test("configuration is opt-in and normalizes network IDs and IPv4, DNS and IPv6 
 		"linux",
 	);
 	assert.equal(configured.failureThreshold, 3);
+	assert.equal(
+		readZeroTierRecoveryConfig(
+			{
+				ZEROTIER_RECOVERY_ENABLED: "true",
+				ZEROTIER_RECOVERY_COOLDOWN_MS: "5000",
+			},
+			"linux",
+		).cooldownMs,
+		5000,
+	);
 	assert.deepEqual(configured.networkIds, [NETWORK_A, NETWORK_B]);
 	assert.deepEqual(configured.probeTargets, [
 		{ host: "192.0.2.1", port: 3306 },
@@ -592,7 +757,7 @@ test("invalid enabled configuration rejects unsafe values and probes on only one
 		["ZEROTIER_RECOVERY_INTERVAL_MS", "Infinity"],
 		["ZEROTIER_RECOVERY_FAILURE_THRESHOLD", "1"],
 		["ZEROTIER_RECOVERY_FAILURE_THRESHOLD", "2.5"],
-		["ZEROTIER_RECOVERY_COOLDOWN_MS", "59999"],
+		["ZEROTIER_RECOVERY_COOLDOWN_MS", "4999"],
 		["ZEROTIER_RECOVERY_STARTUP_GRACE_MS", "-1"],
 		["ZEROTIER_RECOVERY_COMMAND_TIMEOUT_MS", "not-a-number"],
 		["ZEROTIER_RECOVERY_RESTART_TIMEOUT_MS", "2147483648"],

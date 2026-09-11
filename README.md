@@ -15,18 +15,18 @@ Os pools MySQL continuam sendo recuperados pelo próprio health check, com um ú
 | Variável | Padrão | Uso |
 | --- | --- | --- |
 | `ZEROTIER_RECOVERY_ENABLED` | `false` | Habilita o monitor. |
-| `ZEROTIER_RECOVERY_INTERVAL_MS` | `30000` | Intervalo entre verificações. |
+| `ZEROTIER_RECOVERY_INTERVAL_MS` | `5000` | Intervalo entre verificações. |
 | `ZEROTIER_RECOVERY_FAILURE_THRESHOLD` | `3` | Falhas consecutivas necessárias para tentar reiniciar. |
-| `ZEROTIER_RECOVERY_COOLDOWN_MS` | `600000` | Intervalo mínimo entre tentativas, inclusive quando o reinício falha. |
-| `ZEROTIER_RECOVERY_STARTUP_GRACE_MS` | `60000` | Espera inicial antes de verificar a saúde. |
-| `ZEROTIER_RECOVERY_COMMAND_TIMEOUT_MS` | `15000` | Prazo de cada consulta à CLI. |
-| `ZEROTIER_RECOVERY_RESTART_TIMEOUT_MS` | `30000` | Prazo do comando de reinício. |
+| `ZEROTIER_RECOVERY_COOLDOWN_MS` | `60000` | Intervalo mínimo entre tentativas, inclusive quando o reinício falha. |
+| `ZEROTIER_RECOVERY_STARTUP_GRACE_MS` | `5000` | Espera inicial antes de verificar a saúde. |
+| `ZEROTIER_RECOVERY_COMMAND_TIMEOUT_MS` | `5000` | Prazo de cada consulta à CLI. |
+| `ZEROTIER_RECOVERY_RESTART_TIMEOUT_MS` | `5000` | Prazo do comando de reinício. |
 | `ZEROTIER_RECOVERY_NETWORK_IDS` | vazio | IDs de rede com 16 caracteres hexadecimais, separados por vírgula; vazio desativa a checagem de redes específicas. |
 | `ZEROTIER_RECOVERY_PROBE_TARGETS` | vazio | Destinos `host:porta`, separados por vírgula, com ao menos dois hosts distintos; prazo TCP de 5 segundos por destino. |
 | `ZEROTIER_CLI_PATH` | padrão da plataforma | Caminho absoluto do executável da CLI, sem argumentos. |
 | `ZEROTIER_RECOVERY_USE_SUDO` | `false` | Linux: executa as consultas e o reinício com `sudo -n`. |
 
-Os valores numéricos são inteiros: mínimo de 2 falhas, 60000 ms de intervalo entre tentativas e 1000 ms nos demais tempos; máximo de 2147483647. Uma configuração inválida desativa somente o monitor e gera um log, sem impedir a inicialização da API.
+Os valores numéricos são inteiros: mínimo de 2 falhas e 5000 ms nos tempos; máximo de 2147483647. Uma configuração inválida desativa somente o monitor e gera um log, sem impedir a inicialização da API. A tabela mostra os padrões do código quando as variáveis estão ausentes; `.env.example` define explicitamente tempos maiores.
 
 Use somente um monitor por host. No PM2, processos com `NODE_APP_INSTANCE` diferente de `0` não iniciam o monitor. Essa proteção não coordena aplicações PM2 distintas, contêineres ou outros gerenciadores. A contagem e o intervalo mínimo entre tentativas ficam em memória e são reiniciados com o processo.
 
@@ -46,6 +46,12 @@ Confirme que os executáveis autorizados e seus diretórios são administrados p
 sudo -n /usr/sbin/zerotier-cli -j info
 sudo -n /usr/sbin/zerotier-cli -j listnetworks
 ```
+
+Se aparecer `reinicio bloqueado`, o diagnóstico não autorizou uma tentativa de reinício. Os logs distinguem CLI ausente, sudo ausente, execução sem permissão, autenticação local e falha do sudo. O mesmo bloqueio é registrado no máximo uma vez por minuto; as verificações continuam no intervalo configurado. Mudanças de motivo e retorno à saúde são registrados imediatamente na próxima verificação.
+
+Para investigar no servidor, execute os comandos acima com o usuário do PM2 (por exemplo, `inpulse`) e o caminho de `ZEROTIER_CLI_PATH`. Uma regra que libera apenas `zerotier-cli info` não libera necessariamente os argumentos usados pelo monitor, `zerotier-cli -j info`. Se a CLI funcionar com sudo, mas o monitor acusar autenticação, confira `ZEROTIER_RECOVERY_USE_SUDO=true` no ambiente do processo. Não publique o conteúdo de `authtoken.secret` nem o `.env` completo. `Error connecting to the ZeroTier service` indica falha de conexão com o daemon e é classificado separadamente como recuperável.
+
+Depois de corrigir o ambiente, use `pm2 restart instances --update-env`, substituindo `instances` pelo nome real da aplicação. O [PM2 exige `--update-env` para atualizar variáveis fornecidas pela CLI](https://pm2.io/docs/runtime/best-practices/environment-variables/); confira também a origem das variáveis, pois valores já presentes no processo têm precedência sobre o `.env` carregado pelo aplicativo. O erro isolado de uma rota `/query` precisa do erro completo para ser atribuído ao ZeroTier.
 
 No Windows, o caminho padrão é `C:\Program Files (x86)\ZeroTier\One\zerotier-one_x64.exe`; ajuste `ZEROTIER_CLI_PATH` conforme a instalação. A conta do processo precisa acessar a CLI e ter permissão para reiniciar `ZeroTierOneService`, nome confirmado na [documentação do serviço](https://docs.zerotier.com/faq/noservice/). A opção de sudo se aplica somente ao Linux. O executável do ZeroTier é chamado diretamente em modo CLI (`-q -j info` e, quando necessário, `-q -j listnetworks`), sem arquivo `.bat`.
 
