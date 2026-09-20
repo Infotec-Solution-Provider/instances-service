@@ -2,6 +2,8 @@
 ## Descrição
 Este micro serviço é responsável por guardar dados como conexões com banco de dados e parâmetros do WhatsApp, além de ser responsável por gerênciar conexòes com o banco e realizar qualquer tipo de consulta SQL
 
+A fundação para novos repositórios transacionais dos tenants está documentada em [docs/tenant-database.md](docs/tenant-database.md). É uma camada interna separada do acesso SQL legado; ainda não altera o destino dos dados operacionais.
+
 ## Recuperação opcional do ZeroTier
 
 O monitor pode reiniciar o serviço local do ZeroTier quando detectar falhas persistentes. Fica **desabilitado por padrão** e precisa ser habilitado com `ZEROTIER_RECOVERY_ENABLED=true` no ambiente do instances-service. Suporta Linux com systemd e Windows, com o ZeroTier instalado no mesmo host. Reiniciar o ZeroTier interrompe temporariamente o tráfego de todos os aplicativos que usam suas redes nesse host.
