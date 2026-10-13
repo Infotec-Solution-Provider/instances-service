@@ -55,7 +55,7 @@ class GeoCacheService {
 		const data = await this.getOrRefresh<StateItem[]>(
 			this.STATES_KEY,
 			this.STATES_TTL_MS,
-			this.fetchStatesFromIbge,
+			() => this.fetchStatesFromIbge(),
 		);
 
 		return [...data].sort((a, b) => a.name.localeCompare(b.name));
