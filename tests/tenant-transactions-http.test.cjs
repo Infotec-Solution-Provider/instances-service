@@ -46,6 +46,8 @@ async function fixture(t, options = {}) {
 						return options.triggers ?? [];
 					if (sql === "SELECT CODIGO FROM campanhas WHERE CODIGO=? FOR UPDATE")
 						return options.missingCampaign ? [] : [{ CODIGO: params[0] }];
+					if (sql === "SELECT CODIGO FROM campanhas_clientes WHERE CODIGO=? FOR UPDATE")
+						return options.missingSchedule ? [] : [{ CODIGO: params[0] }];
 					if (/^INSERT INTO campanhas_clientes\b/.test(sql) && options.generationCount !== undefined)
 						return { affectedRows: options.generationCount };
 					return { affectedRows: options.affectedRows ?? 1 };
@@ -140,6 +142,29 @@ test("generation locks a known campaign before any audience write", async t => {
   const f=await fixture(t,{missingCampaign:true});
   assert.equal((await f.send(generationBatch())).status,409);
   assert.equal(f.queries.length,2);
+});
+function finishBatch() {
+  return { operation: "telephony.schedule.finish", scheduleId: 41, tables: ["campanhas_clientes", "historico_cli", "telephony_schedule_finishes", "resultados", "operadores"], statements: [
+    { sql: "UPDATE campanhas_clientes SET RESULTADO=? WHERE CODIGO=? AND OPERADOR=?", params: [9,41,7], expectAffectedRows: 1 },
+    { sql: "INSERT INTO historico_cli (CLIENTE,CC_CODIGO) VALUES (?,?)", params: [1,41], expectAffectedRows: 1 },
+    { sql: "INSERT INTO telephony_schedule_finishes (operation_id) VALUES (?)", params: ["fixture-op"], expectAffectedRows: 1 },
+  ] };
+}
+test("finalization locks one schedule and atomically requires schedule, history and receipt acknowledgements", async t => {
+  const f=await fixture(t);
+  assert.deepEqual(await f.send(finishBatch()), {status:200,body:{data:[{affectedRows:1},{affectedRows:1},{affectedRows:1}]}});
+  assert.equal(f.transactions[0].operation,"telephony.schedule.finish");
+  assert.deepEqual(f.queries[0].params,["campanhas_clientes","historico_cli","telephony_schedule_finishes"]);
+  assert.equal(f.queries[1].sql,"SELECT CODIGO FROM campanhas_clientes WHERE CODIGO=? FOR UPDATE");
+  assert.deepEqual(f.queries[1].params,[41]);
+});
+test("finalization rejects missing locks, missing required tables, mutated operations and unsigned context", async t => {
+  const f=await fixture(t,{missingSchedule:true}); assert.equal((await f.send(finishBatch())).status,409); assert.equal(f.queries.length,2);
+  const g=await fixture(t);
+  for(const mutate of [b=>delete b.scheduleId,b=>b.scheduleId=0,b=>b.scheduleId=2147483648,b=>b.tables.pop(),b=>b.statements.pop(),b=>b.statements[1].sql="INSERT INTO operadores (CODIGO) VALUES (?)",b=>b.statements[2].sql="INSERT INTO historico_cli (CLIENTE) VALUES (?)",b=>b.statements[1].expectAffectedRows=0,b=>b.campaignId=12]) {
+    const body=finishBatch(); mutate(body); assert.equal((await g.send(body)).status,400);
+  }
+  assert.equal(g.transactions.length,0);
 });
 test("no signing secret fails closed without contacting tenant", async (t) => {
 	const f = await fixture(t, { secret: "" });

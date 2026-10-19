@@ -18,6 +18,7 @@ const requiredTables = [
 	"operadores",
 ];
 const generationTables = ["campanhas", "campanhas_clientes", "clientes", "operadores", "excecoes", "excecoes_cidade", "excecoes_estado", "excecoes_segmentos"];
+const finishTables = ["campanhas_clientes", "historico_cli", "telephony_schedule_finishes", "resultados", "operadores"];
 const windowMs = 60_000;
 interface Statement {
 	sql: string;
@@ -27,6 +28,7 @@ interface Statement {
 interface Batch {
 	operation: string;
 	campaignId?: number;
+	scheduleId?: number;
 	tables: string[];
 	statements: Statement[];
 }
@@ -39,14 +41,16 @@ function parseBatch(value: unknown): Batch {
 		return invalid();
 	const batch = value as Record<string, unknown>;
 	const generation = batch["operation"] === "crm.campaign.generate";
-	const permitted = generation ? new Set(generationTables) : allowedTables;
-	const required = generation ? generationTables : requiredTables;
+	const finish = batch["operation"] === "telephony.schedule.finish";
+	const permitted = generation ? new Set(generationTables) : finish ? new Set(finishTables) : allowedTables;
+	const required = generation ? generationTables : finish ? finishTables : requiredTables;
 	if (
 		Object.keys(batch).some(
-			(key) => !["operation", "tables", "statements", ...(generation ? ["campaignId"] : [])].includes(key),
+			(key) => !["operation", "tables", "statements", ...(generation ? ["campaignId"] : []), ...(finish ? ["scheduleId"] : [])].includes(key),
 		) ||
 		(generation && (!Number.isInteger(batch["campaignId"]) || Number(batch["campaignId"]) < 1 || Number(batch["campaignId"]) > 2147483647)) ||
-		(!generation && batch["operation"] !== "telephony.schedule.edit") ||
+		(finish && (!Number.isInteger(batch["scheduleId"]) || Number(batch["scheduleId"]) < 1 || Number(batch["scheduleId"]) > 2147483647)) ||
+		(!generation && !finish && batch["operation"] !== "telephony.schedule.edit") ||
 		!Array.isArray(batch["tables"]) ||
 		batch["tables"].length > permitted.size ||
 		batch["tables"].some(
@@ -56,7 +60,7 @@ function parseBatch(value: unknown): Batch {
 			(table) => !(batch["tables"] as unknown[]).includes(table),
 		) ||
 		!Array.isArray(batch["statements"]) ||
-		batch["statements"].length !== 2
+		batch["statements"].length !== (finish ? 3 : 2)
 	)
 		return invalid();
 	const statements = batch["statements"].map(
@@ -77,6 +81,7 @@ function parseBatch(value: unknown): Batch {
 				!(
 					generation
 						? index === 0 ? /^\s*UPDATE\s+`?campanhas`?\s/i : /^\s*INSERT\s+INTO\s+`?campanhas_clientes`?\s*\(/i
+						: finish ? index === 0 ? /^\s*UPDATE\s+`?campanhas_clientes`?\s/i : index === 1 ? /^\s*INSERT\s+INTO\s+`?historico_cli`?\s*\(/i : /^\s*INSERT\s+INTO\s+`?telephony_schedule_finishes`?\s*\(/i
 						: index === 0 ? /^\s*UPDATE\s+`?campanhas_clientes`?\s/i : /^\s*INSERT\s+INTO\s+`?telephony_schedule_edits`?\s*\(/i
 				).test(sql) ||
 				(generation && index === 1
@@ -104,8 +109,9 @@ function parseBatch(value: unknown): Batch {
 		},
 	);
 	return {
-		operation: generation ? "crm.campaign.generate" : "telephony.schedule.edit",
+		operation: generation ? "crm.campaign.generate" : finish ? "telephony.schedule.finish" : "telephony.schedule.edit",
 		...(generation ? { campaignId: Number(batch["campaignId"]) } : {}),
+		...(finish ? { scheduleId: Number(batch["scheduleId"]) } : {}),
 		tables: [...new Set(batch["tables"] as string[])],
 		statements,
 	};
@@ -166,9 +172,10 @@ export function createTenantTransactionsRouter(
 				batch.tables,
 				async (tx) => {
 					// Unknown triggers can write outside the declared tables/engines. Validate under metadata locks.
+					const mutated = batch.operation === "crm.campaign.generate" ? ["campanhas", "campanhas_clientes"] : batch.operation === "telephony.schedule.finish" ? ["campanhas_clientes", "historico_cli", "telephony_schedule_finishes"] : ["campanhas_clientes", "telephony_schedule_edits"];
 					const triggers = await tx.execute<unknown[]>(
-						"SELECT TRIGGER_NAME FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = DATABASE() AND EVENT_OBJECT_TABLE IN (?, ?) LIMIT 1",
-						batch.operation === "crm.campaign.generate" ? ["campanhas", "campanhas_clientes"] : ["campanhas_clientes", "telephony_schedule_edits"],
+						`SELECT TRIGGER_NAME FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = DATABASE() AND EVENT_OBJECT_TABLE IN (${mutated.map(() => "?").join(", ")}) LIMIT 1`,
+						mutated,
 					);
 					if (triggers.length)
 						throw new TenantDatabaseError(
@@ -183,6 +190,10 @@ export function createTenantTransactionsRouter(
 						);
 						if (locked.length !== 1)
 							throw new TenantDatabaseError("TENANT_TRANSACTION_AFFECTED_ROWS");
+					}
+					if (batch.operation === "telephony.schedule.finish") {
+						const locked = await tx.execute<unknown[]>("SELECT CODIGO FROM campanhas_clientes WHERE CODIGO=? FOR UPDATE", [batch.scheduleId!]);
+						if (locked.length !== 1) throw new TenantDatabaseError("TENANT_TRANSACTION_AFFECTED_ROWS");
 					}
 					const results: unknown[] = [];
 					for (const statement of batch.statements) {
