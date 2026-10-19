@@ -17,6 +17,7 @@ const requiredTables = [
 	"clientes",
 	"operadores",
 ];
+const generationTables = ["campanhas", "campanhas_clientes", "clientes", "operadores", "excecoes", "excecoes_cidade", "excecoes_estado", "excecoes_segmentos"];
 const windowMs = 60_000;
 interface Statement {
 	sql: string;
@@ -36,17 +37,20 @@ function parseBatch(value: unknown): Batch {
 	if (!value || typeof value !== "object" || Array.isArray(value))
 		return invalid();
 	const batch = value as Record<string, unknown>;
+	const generation = batch["operation"] === "crm.campaign.generate";
+	const permitted = generation ? new Set(generationTables) : allowedTables;
+	const required = generation ? generationTables : requiredTables;
 	if (
 		Object.keys(batch).some(
 			(key) => !["operation", "tables", "statements"].includes(key),
 		) ||
-		batch["operation"] !== "telephony.schedule.edit" ||
+		(!generation && batch["operation"] !== "telephony.schedule.edit") ||
 		!Array.isArray(batch["tables"]) ||
-		batch["tables"].length > allowedTables.size ||
+		batch["tables"].length > permitted.size ||
 		batch["tables"].some(
-			(table) => typeof table !== "string" || !allowedTables.has(table),
+			(table) => typeof table !== "string" || !permitted.has(table),
 		) ||
-		requiredTables.some(
+		required.some(
 			(table) => !(batch["tables"] as unknown[]).includes(table),
 		) ||
 		!Array.isArray(batch["statements"]) ||
@@ -69,13 +73,15 @@ function parseBatch(value: unknown): Batch {
 				Buffer.byteLength(sql) > 65_536 ||
 				/;|--|\/\*|#/.test(sql) ||
 				!(
-					index === 0
-						? /^\s*UPDATE\s+`?campanhas_clientes`?\s/i
-						: /^\s*INSERT\s+INTO\s+`?telephony_schedule_edits`?\s*\(/i
+					generation
+						? index === 0 ? /^\s*UPDATE\s+`?campanhas`?\s/i : /^\s*INSERT\s+INTO\s+`?campanhas_clientes`?\s*\(/i
+						: index === 0 ? /^\s*UPDATE\s+`?campanhas_clientes`?\s/i : /^\s*INSERT\s+INTO\s+`?telephony_schedule_edits`?\s*\(/i
 				).test(sql) ||
-				statement["expectAffectedRows"] !== 1 ||
+				(generation && index === 1
+					? !Number.isInteger(statement["expectAffectedRows"]) || Number(statement["expectAffectedRows"]) < 0 || Number(statement["expectAffectedRows"]) > 2000
+					: statement["expectAffectedRows"] !== 1) ||
 				!Array.isArray(params) ||
-				params.length > 200 ||
+				params.length > (generation ? 500 : 200) ||
 				params.some(
 					(param) =>
 						param !== null &&
@@ -92,11 +98,11 @@ function parseBatch(value: unknown): Batch {
 				)
 			)
 				return invalid();
-			return { sql, params, expectAffectedRows: 1 };
+			return { sql, params, expectAffectedRows: Number(statement["expectAffectedRows"]) };
 		},
 	);
 	return {
-		operation: "telephony.schedule.edit",
+		operation: generation ? "crm.campaign.generate" : "telephony.schedule.edit",
 		tables: [...new Set(batch["tables"] as string[])],
 		statements,
 	};
@@ -159,7 +165,7 @@ export function createTenantTransactionsRouter(
 					// Unknown triggers can write outside the declared tables/engines. Validate under metadata locks.
 					const triggers = await tx.execute<unknown[]>(
 						"SELECT TRIGGER_NAME FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = DATABASE() AND EVENT_OBJECT_TABLE IN (?, ?) LIMIT 1",
-						["campanhas_clientes", "telephony_schedule_edits"],
+						batch.operation === "crm.campaign.generate" ? ["campanhas", "campanhas_clientes"] : ["campanhas_clientes", "telephony_schedule_edits"],
 					);
 					if (triggers.length)
 						throw new TenantDatabaseError(
