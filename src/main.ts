@@ -11,6 +11,7 @@ import AuthController from "./controllers/auth.controller";
 import GeoController from "./controllers/geo.controller";
 import { Logger, logRoutes } from "@in.pulse-crm/utils";
 import { startZeroTierRecovery } from "./services/zerotier-recovery.service";
+import { createTenantTransactionsRouter } from "./controllers/tenant-transactions.controller";
 
 const app = express();
 const appPort = Number(process.env["LISTEN_PORT"]) || 8000;
@@ -27,6 +28,7 @@ const controllers = {
 app.use(express.json({ limit: "20mb" }));
 app.use(express.urlencoded({ limit: "20mb", extended: true }));
 app.use(cors());
+app.use(createTenantTransactionsRouter());
 app.use(controllers.auth.router);
 app.use(controllers.instances.router);
 app.use(controllers.servers.router);
