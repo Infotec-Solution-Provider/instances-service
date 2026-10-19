@@ -26,6 +26,7 @@ interface Statement {
 }
 interface Batch {
 	operation: string;
+	campaignId?: number;
 	tables: string[];
 	statements: Statement[];
 }
@@ -42,8 +43,9 @@ function parseBatch(value: unknown): Batch {
 	const required = generation ? generationTables : requiredTables;
 	if (
 		Object.keys(batch).some(
-			(key) => !["operation", "tables", "statements"].includes(key),
+			(key) => !["operation", "tables", "statements", ...(generation ? ["campaignId"] : [])].includes(key),
 		) ||
+		(generation && (!Number.isInteger(batch["campaignId"]) || Number(batch["campaignId"]) < 1 || Number(batch["campaignId"]) > 2147483647)) ||
 		(!generation && batch["operation"] !== "telephony.schedule.edit") ||
 		!Array.isArray(batch["tables"]) ||
 		batch["tables"].length > permitted.size ||
@@ -103,6 +105,7 @@ function parseBatch(value: unknown): Batch {
 	);
 	return {
 		operation: generation ? "crm.campaign.generate" : "telephony.schedule.edit",
+		...(generation ? { campaignId: Number(batch["campaignId"]) } : {}),
 		tables: [...new Set(batch["tables"] as string[])],
 		statements,
 	};
@@ -171,6 +174,16 @@ export function createTenantTransactionsRouter(
 						throw new TenantDatabaseError(
 							"TENANT_TRANSACTION_UNREVIEWED_TRIGGERS",
 						);
+					// Serialize batches before evaluating progress subqueries. A repeated
+					// request must see the previous batch's committed audience and links.
+					if (batch.operation === "crm.campaign.generate") {
+						const locked = await tx.execute<unknown[]>(
+							"SELECT CODIGO FROM campanhas WHERE CODIGO=? FOR UPDATE",
+							[batch.campaignId!],
+						);
+						if (locked.length !== 1)
+							throw new TenantDatabaseError("TENANT_TRANSACTION_AFFECTED_ROWS");
+					}
 					const results: unknown[] = [];
 					for (const statement of batch.statements) {
 						const result = await tx.execute<{

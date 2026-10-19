@@ -18,6 +18,8 @@ export const createTenantMysqlPool: PoolFactory = (
 		supportBigNumbers: true,
 		bigNumberStrings: true,
 		multipleStatements: false,
+		// CAS expects matched rows, including an unchanged intermediate batch flag.
+		flags: ["FOUND_ROWS"],
 		waitForConnections: false,
 		connectionLimit: connections,
 		connectTimeout: timeoutMs,

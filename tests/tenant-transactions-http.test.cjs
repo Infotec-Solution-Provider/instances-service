@@ -44,6 +44,8 @@ async function fixture(t, options = {}) {
 					queries.push({ sql, params });
 					if (sql.includes("information_schema.TRIGGERS"))
 						return options.triggers ?? [];
+					if (sql === "SELECT CODIGO FROM campanhas WHERE CODIGO=? FOR UPDATE")
+						return options.missingCampaign ? [] : [{ CODIGO: params[0] }];
 					if (/^INSERT INTO campanhas_clientes\b/.test(sql) && options.generationCount !== undefined)
 						return { affectedRows: options.generationCount };
 					return { affectedRows: options.affectedRows ?? 1 };
@@ -113,7 +115,7 @@ test("signed command binds tenant, payload and operation; executes sequentially 
 	assert.match(f.queries[2].sql, /^INSERT/);
 });
 function generationBatch(count = 2) {
-  return { operation: "crm.campaign.generate", tables: ["campanhas", "campanhas_clientes", "clientes", "operadores", "excecoes", "excecoes_cidade", "excecoes_estado", "excecoes_segmentos"], statements: [
+  return { operation: "crm.campaign.generate", campaignId: 12, tables: ["campanhas", "campanhas_clientes", "clientes", "operadores", "excecoes", "excecoes_cidade", "excecoes_estado", "excecoes_segmentos"], statements: [
     { sql: "UPDATE campanhas SET GERADO_LISTA='SIM' WHERE CODIGO=? AND GERADO_LISTA='NAO'", params: [12], expectAffectedRows: 1 },
     { sql: "INSERT INTO campanhas_clientes (CLIENTE,CAMPANHA) SELECT CODIGO,? FROM clientes LIMIT 2001", params: [12], expectAffectedRows: count },
   ] };
@@ -123,13 +125,21 @@ test("campaign generation uses the signed bounded operation and guards both muta
   assert.deepEqual(await f.send(generationBatch()),{status:200,body:{data:[{affectedRows:1},{affectedRows:2}]}});
   assert.equal(f.transactions[0].operation,"crm.campaign.generate");
   assert.deepEqual(f.queries[0].params,["campanhas","campanhas_clientes"]);
+  assert.equal(f.queries[1].sql,"SELECT CODIGO FROM campanhas WHERE CODIGO=? FOR UPDATE");
+  assert.deepEqual(f.queries[1].params,[12]);
+  assert.match(f.queries[2].sql,/^UPDATE/);
 });
 test("campaign generation rolls back a changed audience count and rejects unbounded SQL/counts", async t => {
   const f=await fixture(t,{generationCount:3});
   assert.deepEqual(await f.send(generationBatch(2)),{status:409,body:{code:"TENANT_TRANSACTION_AFFECTED_ROWS",outcome:"NOT_COMMITTED"}});
-  for(const mutate of [b=>b.statements[1].expectAffectedRows=2001,b=>b.statements[1].expectAffectedRows=-1,b=>b.statements[0].expectAffectedRows=2,b=>b.statements[1].sql="DELETE FROM campanhas_clientes",b=>b.tables.pop()]){
+  for(const mutate of [b=>delete b.campaignId,b=>b.campaignId=0,b=>b.campaignId=2147483648,b=>b.statements[1].expectAffectedRows=2001,b=>b.statements[1].expectAffectedRows=-1,b=>b.statements[0].expectAffectedRows=2,b=>b.statements[1].sql="DELETE FROM campanhas_clientes",b=>b.tables.pop()]){
     const body=generationBatch();mutate(body);assert.equal((await f.send(body)).status,400);
   }
+});
+test("generation locks a known campaign before any audience write", async t => {
+  const f=await fixture(t,{missingCampaign:true});
+  assert.equal((await f.send(generationBatch())).status,409);
+  assert.equal(f.queries.length,2);
 });
 test("no signing secret fails closed without contacting tenant", async (t) => {
 	const f = await fixture(t, { secret: "" });
