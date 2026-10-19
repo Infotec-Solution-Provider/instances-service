@@ -194,6 +194,19 @@ test("network timeouts do not cause SQL replay or change query parameters", asyn
 	assert.equal(created[0].end.mock.callCount(), 0);
 });
 
+test("single-attempt callers never replay a write after protocol loss", async (t) => {
+	const lost = Object.assign(new Error("connection lost after commit"), { code: "PROTOCOL_CONNECTION_LOST" });
+	const { PoolsService, created, createPool } = loadPools(t, {
+		query: (_sql, _parameters, callback) => callback(lost),
+	});
+	await assert.rejects(PoolsService.query("tenant", "INSERT INTO segmentos (NOME) VALUES (?)", ["Segmento"], {
+		retryOnConnectionLoss: false,
+	}), lost);
+	assert.equal(createPool.mock.callCount(), 1);
+	assert.equal(created[0].query.mock.callCount(), 1);
+	assert.equal(created[0].end.mock.callCount(), 1);
+});
+
 test("health deadline covers the connection queue and releases a late connection without querying it", async (t) => {
 	let acquired;
 	const connection = mockConnection(t);

@@ -153,8 +153,9 @@ class PoolsService {
 		instanceName: string,
 		query: string,
 		parameters: unknown,
+		options: { retryOnConnectionLoss?: boolean } = {},
 	) {
-		const maxRetries = 3;
+		const maxRetries = options.retryOnConnectionLoss === false ? 1 : 3;
 		let lastError: any;
 
 		for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -168,7 +169,7 @@ class PoolsService {
 				lastError = err;
 				console.error(
 					`Erro na tentativa ${attempt}/${maxRetries} para ${instanceName}:`,
-					err.message,
+					options.retryOnConnectionLoss === false ? err.code ?? "QUERY_FAILED" : err.message,
 				);
 
 				// Só destrói o pool em erros fatais de protocolo (estado irrecuperável).

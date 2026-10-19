@@ -8,7 +8,7 @@ import { QueryDto } from "../dtos/query.dto";
 class PoolsController {
 	public readonly router: core.Router;
 
-	constructor() {
+	constructor(private readonly queryOnce: typeof PoolsService.query = PoolsService.query.bind(PoolsService)) {
 		this.router = Router();
 
 		// Ensure this route accepts larger payloads for big queries/parameters
@@ -20,7 +20,33 @@ class PoolsController {
 			validateDto(QueryDto),
 			this.executeQuery,
 		);
+		// New callers use a separate route so an older server cannot silently replay a mutation.
+		this.router.post(
+			"/api/instances/:clientName/query-once",
+			validateDto(QueryDto),
+			this.executeQueryOnce,
+		);
 	}
+
+	private executeQueryOnce = async (req: Request, res: Response): Promise<Response> => {
+		const { query, parameters } = req.body as QueryDto;
+		try {
+			const result = await this.queryOnce(req.params["clientName"]!, query, parameters, {
+				retryOnConnectionLoss: false,
+			});
+			return res.status(200).json({ message: "Consulta concluída.", result });
+		} catch (error) {
+			if (error && typeof error === "object" && "code" in error && error.code === "ER_DUP_ENTRY") {
+				return res.status(409).json({
+					message: "Registro duplicado.", code: "TENANT_DUPLICATE_KEY", outcome: "UNKNOWN",
+				});
+			}
+			// The connection may have failed after MySQL committed. Never leak driver SQL or imply rollback.
+			return res.status(503).json({
+				message: "Não foi possível confirmar a operação no banco.", code: "TENANT_QUERY_FAILED", outcome: "UNKNOWN",
+			});
+		}
+	};
 
 	private async executeQuery(req: Request, res: Response): Promise<Response> {
 		const { query, parameters } = req.body as QueryDto;
