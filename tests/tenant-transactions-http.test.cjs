@@ -44,6 +44,8 @@ async function fixture(t, options = {}) {
 					queries.push({ sql, params });
 					if (sql.includes("information_schema.TRIGGERS"))
 						return options.triggers ?? [];
+					if (/^SELECT CODIGO FROM parametros/.test(sql)) return options.missingPolicy ? [] : [{ CODIGO: 1 }];
+					if (/^SELECT CODIGO FROM clientes WHERE CODIGO=\? FOR UPDATE/.test(sql)) return [{ CODIGO: params[0] }];
 					if (sql === "SELECT CODIGO FROM campanhas WHERE CODIGO=? FOR UPDATE")
 						return options.missingCampaign ? [] : [{ CODIGO: params[0] }];
 					if (sql === "SELECT CODIGO FROM campanhas_clientes WHERE CODIGO=? FOR UPDATE")
@@ -115,6 +117,20 @@ test("signed command binds tenant, payload and operation; executes sequentially 
 	assert.match(f.queries[0].sql, /information_schema.TRIGGERS/);
 	assert.match(f.queries[1].sql, /^UPDATE/);
 	assert.match(f.queries[2].sql, /^INSERT/);
+});
+
+test("customer write locks policy then customer, keeps history in one signed batch and rejects undeclared history/other resources", async t => {
+  const f = await fixture(t);
+  const body = { operation: "crm.customer.write", customerId: 4, tables: ["clientes", "parametros", "motivo_desativacao_cliente"], statements: [{ sql: "UPDATE clientes SET ATIVO=? WHERE CODIGO=?", params: ["NAO", 4], expectAffectedRows: 1 }, { sql: "INSERT INTO motivo_desativacao_cliente (CLIENTE) SELECT ?", params: [4], expectAffectedRows: 1 }] };
+  assert.equal((await f.send(body)).status, 200);
+  assert.match(f.queries[1].sql, /^SELECT CODIGO FROM parametros.*FOR UPDATE$/);
+  assert.match(f.queries[2].sql, /^SELECT CODIGO FROM clientes.*FOR UPDATE$/);
+  for (const mutate of [value => value.tables.push("wallets"), value => value.customerId = -1, value => value.statements[0].sql = "DELETE FROM clientes", value => value.tables = ["clientes", "parametros"], value => value.statements[0].expectAffectedRows = 0]) {
+    const invalid = structuredClone(body); mutate(invalid); assert.equal((await f.send(invalid)).status, 400);
+  }
+  const unavailable = await fixture(t, { missingPolicy: true });
+  assert.equal((await unavailable.send(body)).body.code, "TENANT_CUSTOMER_POLICY_UNAVAILABLE");
+  assert.equal(unavailable.queries.length, 2);
 });
 function generationBatch(count = 2) {
   return { operation: "crm.campaign.generate", campaignId: 12, tables: ["campanhas", "campanhas_clientes", "clientes", "operadores", "excecoes", "excecoes_cidade", "excecoes_estado", "excecoes_segmentos"], statements: [

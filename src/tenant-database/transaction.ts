@@ -129,6 +129,8 @@ export async function runTenantTransaction<T>(
 					poisoned ??=
 						error instanceof TenantDatabaseError
 							? error
+							: error && typeof error === "object" && "code" in error && error.code === "ER_DUP_ENTRY"
+								? new TenantDatabaseError("TENANT_DUPLICATE_KEY")
 							: new TenantDatabaseError(
 									"TENANT_TRANSACTION_QUERY_FAILED",
 								);

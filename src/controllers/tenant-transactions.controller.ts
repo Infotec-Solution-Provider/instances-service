@@ -29,8 +29,23 @@ interface Batch {
 	operation: string;
 	campaignId?: number;
 	scheduleId?: number;
+	customerId?: number;
 	tables: string[];
 	statements: Statement[];
+}
+
+function customerBatch(batch: Record<string, unknown>): Batch {
+  const invalid = (): never => { throw new TenantDatabaseError("TENANT_TRANSACTION_INVALID_REQUEST"); };
+  const permitted = new Set(["clientes", "parametros", "motivo_desativacao_cliente", "operadores", "grupos", "origens_sgr", "midias", "unidades", "segmentos", "campanhas", "uf"]);
+  if (Object.keys(batch).some(key => !["operation", "customerId", "tables", "statements"].includes(key)) || !Number.isInteger(batch["customerId"]) || Number(batch["customerId"]) < 0 || Number(batch["customerId"]) > 2147483647 || !Array.isArray(batch["tables"]) || batch["tables"].length > permitted.size || batch["tables"].some(table => !permitted.has(table)) || !["clientes", "parametros"].every(table => (batch["tables"] as unknown[]).includes(table)) || !Array.isArray(batch["statements"]) || batch["statements"].length < 1 || batch["statements"].length > 2) return invalid();
+  const statements = batch["statements"].map((input: unknown, index: number): Statement => {
+    if (!input || typeof input !== "object" || Array.isArray(input)) return invalid();
+    const data = input as Record<string, unknown>, sql = data["sql"], params = data["params"];
+    if (Object.keys(data).some(key => !["sql", "params", "expectAffectedRows"].includes(key)) || typeof sql !== "string" || Buffer.byteLength(sql) > 65536 || /;|--|\/\*|#/.test(sql) || !(index === 0 ? Number(batch["customerId"]) === 0 ? /^INSERT INTO `?clientes`?\s*\(/i : /^UPDATE `?clientes`?\s/i : /^INSERT INTO `?motivo_desativacao_cliente`?\s*\(/i).test(sql) || !Array.isArray(params) || params.length > 200 || params.some(value => value !== null && typeof value !== "string" && typeof value !== "boolean" && !(typeof value === "number" && Number.isFinite(value))) || (index === 0 ? data["expectAffectedRows"] !== 1 : ![0, 1].includes(Number(data["expectAffectedRows"])))) return invalid();
+    if (index === 1 && !(batch["tables"] as unknown[]).includes("motivo_desativacao_cliente")) return invalid();
+    return { sql, params, expectAffectedRows: Number(data["expectAffectedRows"]) };
+  });
+  return { operation: "crm.customer.write", customerId: Number(batch["customerId"]), tables: [...new Set(batch["tables"] as string[])], statements };
 }
 
 function parseBatch(value: unknown): Batch {
@@ -40,6 +55,7 @@ function parseBatch(value: unknown): Batch {
 	if (!value || typeof value !== "object" || Array.isArray(value))
 		return invalid();
 	const batch = value as Record<string, unknown>;
+	if (batch["operation"] === "crm.customer.write") return customerBatch(batch);
 	const generation = batch["operation"] === "crm.campaign.generate";
 	const finish = batch["operation"] === "telephony.schedule.finish";
 	const permitted = generation ? new Set(generationTables) : finish ? new Set(finishTables) : allowedTables;
@@ -150,7 +166,7 @@ export function createTenantTransactionsRouter(
 		)
 			return reject(401, "TENANT_TRANSACTION_UNAUTHORIZED");
 		const body = JSON.stringify(req.body);
-		if (!body || Buffer.byteLength(body) > 131_072)
+		if (!body || Buffer.byteLength(body) > (req.body?.operation === "crm.customer.write" ? 1_048_576 : 131_072))
 			return reject(413, "TENANT_TRANSACTION_TOO_LARGE");
 		const expected = createHmac("sha256", key)
 			.update(`${timestamp}\n${nonce}\n${req.path}\n${body}`)
@@ -172,7 +188,7 @@ export function createTenantTransactionsRouter(
 				batch.tables,
 				async (tx) => {
 					// Unknown triggers can write outside the declared tables/engines. Validate under metadata locks.
-					const mutated = batch.operation === "crm.campaign.generate" ? ["campanhas", "campanhas_clientes"] : batch.operation === "telephony.schedule.finish" ? ["campanhas_clientes", "historico_cli", "telephony_schedule_finishes"] : ["campanhas_clientes", "telephony_schedule_edits"];
+					const mutated = batch.operation === "crm.customer.write" ? ["clientes", ...(batch.tables.includes("motivo_desativacao_cliente") ? ["motivo_desativacao_cliente"] : [])] : batch.operation === "crm.campaign.generate" ? ["campanhas", "campanhas_clientes"] : batch.operation === "telephony.schedule.finish" ? ["campanhas_clientes", "historico_cli", "telephony_schedule_finishes"] : ["campanhas_clientes", "telephony_schedule_edits"];
 					const triggers = await tx.execute<unknown[]>(
 						`SELECT TRIGGER_NAME FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = DATABASE() AND EVENT_OBJECT_TABLE IN (${mutated.map(() => "?").join(", ")}) LIMIT 1`,
 						mutated,
@@ -196,9 +212,19 @@ export function createTenantTransactionsRouter(
 						if (locked.length !== 1) throw new TenantDatabaseError("TENANT_TRANSACTION_AFFECTED_ROWS");
 					}
 					const results: unknown[] = [];
+					if (batch.operation === "crm.customer.write") {
+						// All web customer writers serialize before policy/duplicate predicates.
+						const policy = await tx.execute<unknown[]>("SELECT CODIGO FROM parametros ORDER BY CODIGO LIMIT 2 FOR UPDATE");
+						if (policy.length !== 1) throw new TenantDatabaseError("TENANT_CUSTOMER_POLICY_UNAVAILABLE");
+						if (batch.customerId) {
+							const rows = await tx.execute<unknown[]>("SELECT CODIGO FROM clientes WHERE CODIGO=? FOR UPDATE", [batch.customerId]);
+							if (rows.length !== 1) throw new TenantDatabaseError("TENANT_TRANSACTION_AFFECTED_ROWS");
+						}
+					}
 					for (const statement of batch.statements) {
 						const result = await tx.execute<{
 							affectedRows?: number;
+							insertId?: number;
 						}>(statement.sql, statement.params);
 						if (
 							result?.affectedRows !==
@@ -208,7 +234,7 @@ export function createTenantTransactionsRouter(
 								"TENANT_TRANSACTION_AFFECTED_ROWS",
 							);
 						// Transport only acknowledgements, never driver metadata or SQL.
-						results.push({ affectedRows: result.affectedRows });
+						results.push({ affectedRows: result.affectedRows, ...(batch.operation === "crm.customer.write" && Number.isSafeInteger(result.insertId) && Number(result.insertId) > 0 ? { insertId: result.insertId } : {}) });
 					}
 					return results;
 				},
