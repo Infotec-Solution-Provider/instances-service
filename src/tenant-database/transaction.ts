@@ -19,6 +19,7 @@ export async function runTenantTransaction<T>(
 	tables: readonly string[],
 	config: TenantDatabaseConfig,
 	callback: (transaction: TenantTransaction) => Promise<T>,
+	repeatableRead = false,
 ): Promise<T> {
 	let open = true,
 		busy = false,
@@ -129,11 +130,16 @@ export async function runTenantTransaction<T>(
 					poisoned ??=
 						error instanceof TenantDatabaseError
 							? error
-							: error && typeof error === "object" && "code" in error && error.code === "ER_DUP_ENTRY"
-								? new TenantDatabaseError("TENANT_DUPLICATE_KEY")
-							: new TenantDatabaseError(
-									"TENANT_TRANSACTION_QUERY_FAILED",
-								);
+							: error &&
+								  typeof error === "object" &&
+								  "code" in error &&
+								  error.code === "ER_DUP_ENTRY"
+								? new TenantDatabaseError(
+										"TENANT_DUPLICATE_KEY",
+									)
+								: new TenantDatabaseError(
+										"TENANT_TRANSACTION_QUERY_FAILED",
+									);
 					throw poisoned;
 				}
 			})();
@@ -164,6 +170,11 @@ export async function runTenantTransaction<T>(
 				"SET SESSION sql_mode = CONCAT_WS(',', @@SESSION.sql_mode, 'STRICT_ALL_TABLES')",
 			);
 			await control("SET SESSION innodb_lock_wait_timeout = 2");
+			// Catalog snapshots need range/gap locks even when a tenant defaults to READ COMMITTED.
+			if (repeatableRead)
+				await control(
+					"SET TRANSACTION ISOLATION LEVEL REPEATABLE READ",
+				);
 			await control("START TRANSACTION");
 			begun = true;
 			// Hold metadata locks through COMMIT so engine/schema cannot change after validation.
