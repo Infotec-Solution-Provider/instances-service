@@ -81,7 +81,13 @@ async function rows(
 		`SELECT * FROM \`${table}\` ORDER BY ${order} LIMIT ${limit + 1} FOR UPDATE`,
 	);
 	if (data.length > limit) return fail("TENANT_ORDERING_TOO_LARGE");
-	if (data.some(row => key === "UF" ? typeof row[key] !== "string" : !Number.isInteger(row[key])))
+	if (
+		data.some((row) =>
+			key === "UF"
+				? typeof row[key] !== "string"
+				: !Number.isInteger(row[key]),
+		)
+	)
 		return fail("TENANT_ORDERING_SCHEMA_UNAVAILABLE");
 	return data;
 }
@@ -211,10 +217,22 @@ async function rank(
 		);
 	}
 }
-function next(data: Row[], field: string) {
+function next(
+	data: Row[],
+	field: string,
+	missingRank = 0,
+	positiveOnly = false,
+) {
 	const value =
-		data.reduce((max, row) => Math.max(max, Number(row[field]) || 0), 0) +
-		1;
+		data.reduce((max, row) => {
+			const raw = row[field];
+			// Append after the effective SQL rank, including legacy NULL/nonpositive tails.
+			const rank =
+				raw === null || (positiveOnly && Number(raw) <= 0)
+					? missingRank
+					: Number(raw) || 0;
+			return Math.max(max, rank);
+		}, 0) + 1;
 	if (value > 2147483647) fail("TENANT_ORDERING_OVERFLOW");
 	return value;
 }
@@ -317,12 +335,19 @@ export class CatalogOrderingService {
 									)
 								: before.data,
 							spec.order,
+							kind === "states"
+								? 9999999
+								: kind === "campaigns"
+									? 0
+									: 999999999,
+							kind === "states" || kind === "segments",
 						),
 					};
 					if (kind === "cities") {
 						values["ORDEMCIDADE"] = next(
 							before.data,
 							"ORDEMCIDADE",
+							999999999,
 						);
 						values["ORDEMESTADO"] =
 							before.states.find(

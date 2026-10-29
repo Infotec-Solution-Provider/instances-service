@@ -100,6 +100,77 @@ for (const port of [13328, 13329])
 						await admin.query(statement);
 				}
 				await t.test(
+					"new entries follow legacy NULL/nonpositive tails without rewriting existing ranks",
+					async () => {
+						const segmentBefore = await sql(
+							"SELECT CODIGO,ordem FROM segmentos ORDER BY CODIGO",
+						);
+						const created = await service.execute("alpha", {
+							action: "create",
+							kind: "segments",
+							fields: { NOME: "Legacy append" },
+						});
+						assert.equal(
+							(await read()).items.at(-1).id,
+							created.id,
+						);
+						await sql("DELETE FROM segmentos WHERE CODIGO=?", [
+							created.id,
+						]);
+						assert.deepEqual(
+							await sql(
+								"SELECT CODIGO,ordem FROM segmentos ORDER BY CODIGO",
+							),
+							segmentBefore,
+						);
+						const cityBefore = await sql(
+							"SELECT CODIGO,ORDEM,ORDEMCIDADE FROM cidades ORDER BY CODIGO",
+						);
+						await service.execute("alpha", {
+							action: "create",
+							kind: "cities",
+							fields: {
+								CODIGO: 90,
+								NOME: "Legacy append",
+								UF: "SP",
+							},
+						});
+						assert.equal(
+							(await read("cities", "national")).items.at(-1).id,
+							90,
+						);
+						assert.equal(
+							(await read("cities", "SP")).items.at(-1).id,
+							90,
+						);
+						await sql("DELETE FROM cidades WHERE CODIGO=90");
+						assert.deepEqual(
+							await sql(
+								"SELECT CODIGO,ORDEM,ORDEMCIDADE FROM cidades ORDER BY CODIGO",
+							),
+							cityBefore,
+						);
+						await sql(
+							"INSERT INTO uf VALUES('QX','Legacy null',NULL,0)",
+						);
+						await service.execute("alpha", {
+							action: "create",
+							kind: "states",
+							fields: {
+								UF: "QY",
+								NOME: "Legacy append",
+								FUSOHORARIO: 0,
+							},
+						});
+						assert.equal(
+							(await read("states")).items.at(-1).id,
+							"QY",
+						);
+						await sql("DELETE FROM uf WHERE UF IN ('QX','QY')");
+					},
+				);
+
+				await t.test(
 					"effective order, ties and unprioritized rows; normalization preserves other fields",
 					async () => {
 						const before = await sql(
