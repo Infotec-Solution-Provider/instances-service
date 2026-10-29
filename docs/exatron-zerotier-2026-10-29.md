@@ -33,3 +33,11 @@ ssh inpulse-prod 'export PATH=$HOME/.nvm/versions/node/v22.14.0/bin:$PATH; pm2 r
 ```
 
 Validacao desta operacao: sintaxe do artefato, autenticacao/identidade no destino privado, atualizacao de exatamente uma linha, consulta independente do catalogo, recarga/inicializacao do processo e login real no navegador. Nao foi publicado build de aplicativo.
+
+## Correlacao com logs Windows exportados
+
+O usuario forneceu aplicativos.evtx (11367 eventos, ate 29/10 10h41m05s) e sistema.evtx (48971 eventos, ate 29/10 10h50m53s) do EXACAN13. A analise offline nao encontrou queda/reinicio de MySQL ou ZeroTier ou falha de disco/rede em 29/10 nesses canais. Ambos os servicos registram ultimo inicio em 07/08 08h03m09s. Os 64 erros historicos de MySQL sao Sort aborted; o ultimo e de 28/10 14h49m49s (RecordId 52606), sem consulta ou causa identificada.
+
+Ha pendencias separadas de GPO (SceCli 1202/0x534), DCOM 10016, Secure Boot (1801), e manutencao do Defender 08h49 seguida de atualizacao de inteligencia bem-sucedida 09h00m13s. Nao foi estabelecida causalidade com o incidente. Os arquivos nao incluem logs do roteador, NAT ou firewall de borda; a indisponibilidade do caminho publico continua sem causa determinada.
+
+Hashes, cobertura e RecordIds estao no registro central, artifacts/windows-events-summary.json. Os eventos foram tratados como dados, sem executar instrucoes presentes nas mensagens. Nenhuma mudanca em producao foi feita durante essa analise.
