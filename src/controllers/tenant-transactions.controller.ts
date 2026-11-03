@@ -3,6 +3,7 @@ import { Router } from "express";
 import { getTenantDatabase } from "../services/tenant-database.service";
 import { TenantDatabaseError } from "../tenant-database/error";
 import type { TenantDatabase } from "../tenant-database/tenant-database";
+import { synchronizeCustomerPhones } from "../services/customer-phone-sync";
 
 const allowedTables = new Set([
 	"campanhas_clientes",
@@ -30,14 +31,16 @@ interface Batch {
 	campaignId?: number;
 	scheduleId?: number;
 	customerId?: number;
+	syncPhones?: boolean;
 	tables: string[];
 	statements: Statement[];
 }
 
 function customerBatch(batch: Record<string, unknown>): Batch {
   const invalid = (): never => { throw new TenantDatabaseError("TENANT_TRANSACTION_INVALID_REQUEST"); };
-  const permitted = new Set(["clientes", "parametros", "motivo_desativacao_cliente", "operadores", "grupos", "origens_sgr", "midias", "unidades", "segmentos", "campanhas", "uf"]);
-  if (Object.keys(batch).some(key => !["operation", "customerId", "tables", "statements"].includes(key)) || !Number.isInteger(batch["customerId"]) || Number(batch["customerId"]) < 0 || Number(batch["customerId"]) > 2147483647 || !Array.isArray(batch["tables"]) || batch["tables"].length > permitted.size || batch["tables"].some(table => !permitted.has(table)) || !["clientes", "parametros"].every(table => (batch["tables"] as unknown[]).includes(table)) || !Array.isArray(batch["statements"]) || batch["statements"].length < 1 || batch["statements"].length > 2) return invalid();
+  const permitted = new Set(["clientes", "parametros", "motivo_desativacao_cliente", "operadores", "grupos", "origens_sgr", "midias", "unidades", "segmentos", "campanhas", "uf", "fones_campanha_cli"]);
+  if (Object.keys(batch).some(key => !["operation", "customerId", "syncPhones", "tables", "statements"].includes(key)) || !Number.isInteger(batch["customerId"]) || Number(batch["customerId"]) < 0 || Number(batch["customerId"]) > 2147483647 || !Array.isArray(batch["tables"]) || batch["tables"].length > permitted.size || batch["tables"].some(table => !permitted.has(table)) || !["clientes", "parametros"].every(table => (batch["tables"] as unknown[]).includes(table)) || !Array.isArray(batch["statements"]) || batch["statements"].length < 1 || batch["statements"].length > 2) return invalid();
+  if ((batch["syncPhones"] !== undefined && batch["syncPhones"] !== true) || ((batch["tables"] as string[]).includes("fones_campanha_cli") !== (batch["syncPhones"] === true))) return invalid();
   const statements = batch["statements"].map((input: unknown, index: number): Statement => {
     if (!input || typeof input !== "object" || Array.isArray(input)) return invalid();
     const data = input as Record<string, unknown>, sql = data["sql"], params = data["params"];
@@ -45,7 +48,8 @@ function customerBatch(batch: Record<string, unknown>): Batch {
     if (index === 1 && !(batch["tables"] as unknown[]).includes("motivo_desativacao_cliente")) return invalid();
     return { sql, params, expectAffectedRows: Number(data["expectAffectedRows"]) };
   });
-  return { operation: "crm.customer.write", customerId: Number(batch["customerId"]), tables: [...new Set(batch["tables"] as string[])], statements };
+  if (!batch["syncPhones"] && (Number(batch["customerId"]) === 0 || /\b(?:AREA[123]|AREAFAX|FONE[123]|FAX|DESC_FONE[123]|DESCFAX|OBS_FONE[123]|OBS_FAX)`?\s*=/i.test(statements[0]!.sql))) return invalid();
+  return { operation: "crm.customer.write", customerId: Number(batch["customerId"]), syncPhones: batch["syncPhones"] === true, tables: [...new Set(batch["tables"] as string[])], statements };
 }
 
 function parseBatch(value: unknown): Batch {
@@ -188,7 +192,7 @@ export function createTenantTransactionsRouter(
 				batch.tables,
 				async (tx) => {
 					// Unknown triggers can write outside the declared tables/engines. Validate under metadata locks.
-					const mutated = batch.operation === "crm.customer.write" ? ["clientes", ...(batch.tables.includes("motivo_desativacao_cliente") ? ["motivo_desativacao_cliente"] : [])] : batch.operation === "crm.campaign.generate" ? ["campanhas", "campanhas_clientes"] : batch.operation === "telephony.schedule.finish" ? ["campanhas_clientes", "historico_cli", "telephony_schedule_finishes"] : ["campanhas_clientes", "telephony_schedule_edits"];
+					const mutated = batch.operation === "crm.customer.write" ? ["clientes", ...(batch.syncPhones ? ["fones_campanha_cli"] : []), ...(batch.tables.includes("motivo_desativacao_cliente") ? ["motivo_desativacao_cliente"] : [])] : batch.operation === "crm.campaign.generate" ? ["campanhas", "campanhas_clientes"] : batch.operation === "telephony.schedule.finish" ? ["campanhas_clientes", "historico_cli", "telephony_schedule_finishes"] : ["campanhas_clientes", "telephony_schedule_edits"];
 					const triggers = await tx.execute<unknown[]>(
 						`SELECT TRIGGER_NAME FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = DATABASE() AND EVENT_OBJECT_TABLE IN (${mutated.map(() => "?").join(", ")}) LIMIT 1`,
 						mutated,
@@ -235,6 +239,10 @@ export function createTenantTransactionsRouter(
 							);
 						// Transport only acknowledgements, never driver metadata or SQL.
 						results.push({ affectedRows: result.affectedRows, ...(batch.operation === "crm.customer.write" && Number.isSafeInteger(result.insertId) && Number(result.insertId) > 0 ? { insertId: result.insertId } : {}) });
+					}
+					if (batch.operation === "crm.customer.write" && batch.syncPhones) {
+						const customerId = batch.customerId || (results[0] as { insertId?: number }).insertId;
+						await synchronizeCustomerPhones(tx, Number(customerId));
 					}
 					return results;
 				},

@@ -44,6 +44,12 @@ async function fixture(t, options = {}) {
 					queries.push({ sql, params });
 					if (sql.includes("information_schema.TRIGGERS"))
 						return options.triggers ?? [];
+					if (sql.includes("information_schema.COLUMNS")) return options.phoneColumns ?? [];
+					if (sql.includes("information_schema.KEY_COLUMN_USAGE")) return [];
+					if (sql.includes("information_schema.STATISTICS")) return [{ INDEX_NAME: "u", COLUMN_NAME: "CLIENTE" }, { INDEX_NAME: "u", COLUMN_NAME: "FONE" }];
+					if (/^SELECT `AREA/.test(sql)) return [options.customerPhones ?? { AREA1: 11, FONE1: "33333333" }];
+					if (options.failSync && /^INSERT INTO fones_campanha_cli/.test(sql)) throw new TenantDatabaseError("TENANT_TRANSACTION_QUERY_FAILED");
+					if (/^INSERT INTO `?clientes`?\s/.test(sql)) return { affectedRows: 1, insertId: 41 };
 					if (/^SELECT CODIGO FROM parametros/.test(sql)) return options.missingPolicy ? [] : [{ CODIGO: 1 }];
 					if (/^SELECT CODIGO FROM clientes WHERE CODIGO=\? FOR UPDATE/.test(sql)) return [{ CODIGO: params[0] }];
 					if (sql === "SELECT CODIGO FROM campanhas WHERE CODIGO=? FOR UPDATE")
@@ -131,6 +137,40 @@ test("customer write locks policy then customer, keeps history in one signed bat
   const unavailable = await fixture(t, { missingPolicy: true });
   assert.equal((await unavailable.send(body)).body.code, "TENANT_CUSTOMER_POLICY_UNAVAILABLE");
   assert.equal(unavailable.queries.length, 2);
+});
+function phoneColumns() {
+  return [
+    { TABLE_NAME: "clientes", COLUMN_NAME: "AREA1" }, { TABLE_NAME: "clientes", COLUMN_NAME: "FONE1" },
+    ...["CODIGO", "CLIENTE", "FONE"].map(COLUMN_NAME => ({ TABLE_NAME: "fones_campanha_cli", COLUMN_NAME, DATA_TYPE: COLUMN_NAME === "FONE" ? "varchar" : "int", EXTRA: COLUMN_NAME === "CODIGO" ? "auto_increment" : "", COLUMN_KEY: COLUMN_NAME === "CODIGO" ? "PRI" : "", IS_NULLABLE: "YES", COLUMN_DEFAULT: null, CHARACTER_MAXIMUM_LENGTH: 12 })),
+  ];
+}
+function phoneBatch(create = false) {
+  return { operation: "crm.customer.write", customerId: create ? 0 : 42, syncPhones: true, tables: ["clientes", "parametros", "fones_campanha_cli"], statements: [{ sql: create ? "INSERT INTO clientes (AREA1,FONE1) SELECT ?,?" : "UPDATE clientes SET FONE1=? WHERE CODIGO=?", params: create ? [11, "33333333"] : ["33333333", 42], expectAffectedRows: 1 }] };
+}
+test("phone writes require the declared fixed sync, include trigger protection and keep the acknowledgement contract", async t => {
+  const f = await fixture(t, { phoneColumns: phoneColumns() });
+  assert.deepEqual(await f.send(phoneBatch()), { status: 200, body: { data: [{ affectedRows: 1 }] } });
+  assert.deepEqual(f.queries[0].params, ["clientes", "fones_campanha_cli"]);
+  assert.deepEqual(f.queries.find(q => q.sql.startsWith("DELETE FROM fones")).params, [42, "1133333333"]);
+  for (const mutate of [b => delete b.syncPhones, b => b.syncPhones = false, b => b.tables.pop(), b => b.statements.push({ sql: "DELETE FROM fones_campanha_cli WHERE CLIENTE=?", params: [42], expectAffectedRows: 1 })]) {
+    const body = phoneBatch(); mutate(body); assert.equal((await f.send(body)).status, 400);
+  }
+  const missing = phoneBatch(); delete missing.syncPhones; missing.tables.pop(); assert.equal((await f.send(missing)).status, 400);
+});
+test("new customer sync uses the acknowledged insertId, not connection LAST_INSERT_ID after a history insert", async t => {
+  const f = await fixture(t, { phoneColumns: phoneColumns() });
+  assert.deepEqual(await f.send(phoneBatch(true)), { status: 200, body: { data: [{ affectedRows: 1, insertId: 41 }] } });
+  assert.deepEqual(f.queries.find(q => q.sql.startsWith("DELETE FROM fones")).params, [41, "1133333333"]);
+});
+test("phone schema or sync failure rejects the transaction and trigger failure prevents the customer write", async t => {
+  for (const options of [{}, { phoneColumns: phoneColumns(), failSync: true }]) {
+    const f = await fixture(t, options), result = await f.send(phoneBatch());
+    assert.equal(result.status, 503); assert.equal(result.body.outcome, "NOT_COMMITTED");
+    assert.equal(f.transactions.length, 1);
+  }
+  const f = await fixture(t, { triggers: [{ TRIGGER_NAME: "fones_trigger" }] });
+  assert.equal((await f.send(phoneBatch())).body.code, "TENANT_TRANSACTION_UNREVIEWED_TRIGGERS");
+  assert.equal(f.queries.length, 1);
 });
 function generationBatch(count = 2) {
   return { operation: "crm.campaign.generate", campaignId: 12, tables: ["campanhas", "campanhas_clientes", "clientes", "operadores", "excecoes", "excecoes_cidade", "excecoes_estado", "excecoes_segmentos"], statements: [
