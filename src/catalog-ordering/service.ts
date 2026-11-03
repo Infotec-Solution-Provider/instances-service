@@ -3,6 +3,8 @@ import type { TenantDatabase } from "../tenant-database/tenant-database";
 import type { TenantTransaction } from "../tenant-database/transaction";
 import { TenantDatabaseError } from "../tenant-database/error";
 import { compileOrder, parseOrder, orderExpressions } from "./ordering";
+import { writePhoneArea } from "./phone-areas";
+import { associateDddCities } from "./ddd-coverage";
 
 type Row = Record<string, string | number | null>;
 type Kind = "campaigns" | "segments" | "states" | "cities";
@@ -242,6 +244,8 @@ export class CatalogOrderingService {
 		private readonly database: Pick<TenantDatabase, "transaction">,
 	) {}
 	async execute(tenant: string, input: unknown): Promise<unknown> {
+		if (input && typeof input === "object" && !Array.isArray(input) && (input as Record<string, unknown>)["action"] === "phone-area-associate") return associateDddCities(this.database, tenant, input);
+		if (input && typeof input === "object" && !Array.isArray(input) && ["phone-area-create", "phone-area-patch"].includes(String((input as Record<string, unknown>)["action"]))) return writePhoneArea(this.database, tenant, input);
 		const body = object(input, [
 			"action",
 			"kind",
