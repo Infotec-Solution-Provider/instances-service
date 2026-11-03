@@ -144,6 +144,7 @@ export class TenantDatabase {
 					operation === "crm.proposal.change" ||
 					operation === "crm.satisfaction.question.write" ||
 					operation === "crm.administration.transfer" ||
+					operation === "crm.customer.write" ||
 					operation === "telephony.schedule.finish",
 				operation === "crm.administration.transfer",
 			);

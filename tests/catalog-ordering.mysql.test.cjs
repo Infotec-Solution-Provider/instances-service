@@ -7,7 +7,7 @@ const { createTenantMysqlPool } = require("../dist/tenant-database/mysql-pool");
 const { CatalogOrderingService } = require("../dist/catalog-ordering/service");
 const { compileOrder } = require("../dist/catalog-ordering/ordering");
 const enabled = process.env.RUN_CATALOG_ORDERING_MYSQL === "true";
-for (const port of [13328, 13329])
+for (const port of require("./isolated-mysql-ports.cjs")("CATALOG_ORDERING_MYSQL_PORTS", [13328, 13329]))
 	test(
 		`catalog ordering: isolated MySQL ${port}`,
 		{ skip: !enabled },

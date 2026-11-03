@@ -57,7 +57,9 @@ test("the command executor sends the password once via stdin and excludes it fro
 		assert.equal(call.file, "/usr/bin/sudo");
 		assert.equal(call.input, `${password}\n`);
 		assert.equal(call.options.env[passwordKey], undefined);
-		assert.equal(call.options.env.PATH, process.env.PATH);
+		const pathKey = Object.keys(call.options.env).find(key=>key.toUpperCase()==="PATH");
+		assert.ok(pathKey,"child environment preserves PATH under the platform's spelling");
+		assert.equal(call.options.env[pathKey], process.env.PATH);
 		assert.equal(call.options.windowsHide, true);
 		assert.ok(!call.options.shell);
 		assert.ok(!JSON.stringify(call.args).includes(password));

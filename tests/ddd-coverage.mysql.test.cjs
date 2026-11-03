@@ -7,7 +7,9 @@ const { tenantDatabaseConfig } = require("../dist/tenant-database/config");
 const { CatalogOrderingService } = require("../dist/catalog-ordering/service");
 // Explicit opt-in, fixed loopback only; never consumes production or tenant credentials.
 test("DDD coverage migration and invariants on a fresh isolated local MySQL database", { skip: process.env.RUN_DDD_COVERAGE_MYSQL !== "true" }, async () => {
-  const port = Number(process.env.DDD_COVERAGE_MYSQL_PORT || "13328");
+  const ports = require("./isolated-mysql-ports.cjs")("DDD_COVERAGE_MYSQL_PORT", [13328]);
+  assert.equal(ports.length,1);
+  const port = ports[0];
   assert.ok(Number.isInteger(port) && port > 1024 && port < 65536);
   const name = `ddd_coverage_${process.pid}_${Date.now()}`;
   const admin = await mysql.createConnection({ host: "127.0.0.1", port, user: "root", multipleStatements: false });

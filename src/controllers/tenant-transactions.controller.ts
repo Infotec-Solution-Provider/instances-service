@@ -4,9 +4,23 @@ import { getTenantDatabase } from "../services/tenant-database.service";
 import { TenantDatabaseError } from "../tenant-database/error";
 import type { TenantDatabase } from "../tenant-database/tenant-database";
 import { synchronizeCustomerPhones } from "../services/customer-phone-sync";
-import { proposalBatch, finishProposalStatements } from "../crm-proposals/commands";
+import { validateSatisfactionEffects } from "../services/satisfaction-effect";
+import {
+	parseImportReceipt,
+	findImportReceipt,
+	writeImportReceipt,
+	type CustomerImportReceipt,
+} from "../services/customer-import-receipt";
+import {
+	proposalBatch,
+	finishProposalStatements,
+} from "../crm-proposals/commands";
 import { proposalTables, eventSql, deleteSql } from "../crm-proposals/sql";
-import { parseTransfer, transferCustomers, transferTables } from "../tenant-database/administration-transfer";
+import {
+	parseTransfer,
+	transferCustomers,
+	transferTables,
+} from "../tenant-database/administration-transfer";
 
 const allowedTables = new Set([
 	"campanhas_clientes",
@@ -55,6 +69,7 @@ interface Batch {
 	scheduleId?: number;
 	customerId?: number;
 	syncPhones?: boolean;
+	importReceipt?: CustomerImportReceipt;
 	questionId?: number;
 	surveyQuestions?: { id: number; description: string }[];
 	tables: string[];
@@ -62,19 +77,136 @@ interface Batch {
 }
 
 function customerBatch(batch: Record<string, unknown>): Batch {
-  const invalid = (): never => { throw new TenantDatabaseError("TENANT_TRANSACTION_INVALID_REQUEST"); };
-  const permitted = new Set(["clientes", "parametros", "motivo_desativacao_cliente", "operadores", "grupos", "origens_sgr", "midias", "unidades", "segmentos", "campanhas", "uf", "fones_campanha_cli"]);
-  if (Object.keys(batch).some(key => !["operation", "customerId", "syncPhones", "tables", "statements"].includes(key)) || !Number.isInteger(batch["customerId"]) || Number(batch["customerId"]) < 0 || Number(batch["customerId"]) > 2147483647 || !Array.isArray(batch["tables"]) || batch["tables"].length > permitted.size || batch["tables"].some(table => !permitted.has(table)) || !["clientes", "parametros"].every(table => (batch["tables"] as unknown[]).includes(table)) || !Array.isArray(batch["statements"]) || batch["statements"].length < 1 || batch["statements"].length > 2) return invalid();
-  if ((batch["syncPhones"] !== undefined && batch["syncPhones"] !== true) || ((batch["tables"] as string[]).includes("fones_campanha_cli") !== (batch["syncPhones"] === true))) return invalid();
-  const statements = batch["statements"].map((input: unknown, index: number): Statement => {
-    if (!input || typeof input !== "object" || Array.isArray(input)) return invalid();
-    const data = input as Record<string, unknown>, sql = data["sql"], params = data["params"];
-    if (Object.keys(data).some(key => !["sql", "params", "expectAffectedRows"].includes(key)) || typeof sql !== "string" || Buffer.byteLength(sql) > 65536 || /;|--|\/\*|#/.test(sql) || !(index === 0 ? Number(batch["customerId"]) === 0 ? /^INSERT INTO `?clientes`?\s*\(/i : /^UPDATE `?clientes`?\s/i : /^INSERT INTO `?motivo_desativacao_cliente`?\s*\(/i).test(sql) || !Array.isArray(params) || params.length > 200 || params.some(value => value !== null && typeof value !== "string" && typeof value !== "boolean" && !(typeof value === "number" && Number.isFinite(value))) || (index === 0 ? data["expectAffectedRows"] !== 1 : ![0, 1].includes(Number(data["expectAffectedRows"])))) return invalid();
-    if (index === 1 && !(batch["tables"] as unknown[]).includes("motivo_desativacao_cliente")) return invalid();
-    return { sql, params, expectAffectedRows: Number(data["expectAffectedRows"]) };
-  });
-  if (!batch["syncPhones"] && (Number(batch["customerId"]) === 0 || /\b(?:AREA[123]|AREAFAX|FONE[123]|FAX|DESC_FONE[123]|DESCFAX|OBS_FONE[123]|OBS_FAX)`?\s*=/i.test(statements[0]!.sql))) return invalid();
-  return { operation: "crm.customer.write", customerId: Number(batch["customerId"]), syncPhones: batch["syncPhones"] === true, tables: [...new Set(batch["tables"] as string[])], statements };
+	const invalid = (): never => {
+		throw new TenantDatabaseError("TENANT_TRANSACTION_INVALID_REQUEST");
+	};
+	const receipt =
+		batch["importReceipt"] === undefined
+			? undefined
+			: parseImportReceipt(batch["importReceipt"]);
+	const permitted = new Set([
+		"clientes",
+		"parametros",
+		"motivo_desativacao_cliente",
+		"operadores",
+		"grupos",
+		"origens_sgr",
+		"midias",
+		"unidades",
+		"segmentos",
+		"campanhas",
+		"uf",
+		"fones_campanha_cli",
+		...(receipt ? ["crm_import_receipts"] : []),
+	]);
+	if (
+		Object.keys(batch).some(
+			(key) =>
+				![
+					"operation",
+					"customerId",
+					"syncPhones",
+					"importReceipt",
+					"tables",
+					"statements",
+				].includes(key),
+		) ||
+		!Number.isInteger(batch["customerId"]) ||
+		Number(batch["customerId"]) < 0 ||
+		Number(batch["customerId"]) > 2147483647 ||
+		!Array.isArray(batch["tables"]) ||
+		batch["tables"].length > permitted.size ||
+		batch["tables"].some((table) => !permitted.has(table)) ||
+		!["clientes", "parametros"].every((table) =>
+			(batch["tables"] as unknown[]).includes(table),
+		) ||
+		!Array.isArray(batch["statements"]) ||
+		batch["statements"].length < 1 ||
+		batch["statements"].length > 2
+	)
+		return invalid();
+	if (
+		receipt &&
+		(batch["customerId"] !== 0 ||
+			batch["syncPhones"] !== true ||
+			batch["statements"].length !== 1 ||
+			!["crm_import_receipts", "operadores"].every((table) =>
+				(batch["tables"] as unknown[]).includes(table),
+			))
+	)
+		return invalid();
+	if (
+		(batch["syncPhones"] !== undefined && batch["syncPhones"] !== true) ||
+		(batch["tables"] as string[]).includes("fones_campanha_cli") !==
+			(batch["syncPhones"] === true)
+	)
+		return invalid();
+	const statements = batch["statements"].map(
+		(input: unknown, index: number): Statement => {
+			if (!input || typeof input !== "object" || Array.isArray(input))
+				return invalid();
+			const data = input as Record<string, unknown>,
+				sql = data["sql"],
+				params = data["params"];
+			if (
+				Object.keys(data).some(
+					(key) =>
+						!["sql", "params", "expectAffectedRows"].includes(key),
+				) ||
+				typeof sql !== "string" ||
+				Buffer.byteLength(sql) > 65536 ||
+				/;|--|\/\*|#/.test(sql) ||
+				!(
+					index === 0
+						? Number(batch["customerId"]) === 0
+							? /^INSERT INTO `?clientes`?\s*\(/i
+							: /^UPDATE `?clientes`?\s/i
+						: /^INSERT INTO `?motivo_desativacao_cliente`?\s*\(/i
+				).test(sql) ||
+				!Array.isArray(params) ||
+				params.length > 200 ||
+				params.some(
+					(value) =>
+						value !== null &&
+						typeof value !== "string" &&
+						typeof value !== "boolean" &&
+						!(typeof value === "number" && Number.isFinite(value)),
+				) ||
+				(index === 0
+					? data["expectAffectedRows"] !== 1
+					: ![0, 1].includes(Number(data["expectAffectedRows"])))
+			)
+				return invalid();
+			if (
+				index === 1 &&
+				!(batch["tables"] as unknown[]).includes(
+					"motivo_desativacao_cliente",
+				)
+			)
+				return invalid();
+			return {
+				sql,
+				params,
+				expectAffectedRows: Number(data["expectAffectedRows"]),
+			};
+		},
+	);
+	if (
+		!batch["syncPhones"] &&
+		(Number(batch["customerId"]) === 0 ||
+			/\b(?:AREA[123]|AREAFAX|FONE[123]|FAX|DESC_FONE[123]|DESCFAX|OBS_FONE[123]|OBS_FAX)`?\s*=/i.test(
+				statements[0]!.sql,
+			))
+	)
+		return invalid();
+	return {
+		operation: "crm.customer.write",
+		customerId: Number(batch["customerId"]),
+		syncPhones: batch["syncPhones"] === true,
+		...(receipt ? { importReceipt: receipt } : {}),
+		tables: [...new Set(batch["tables"] as string[])],
+		statements,
+	};
 }
 
 function questionBatch(batch: Record<string, unknown>): Batch {
@@ -143,7 +275,8 @@ function parseBatch(value: unknown): Batch {
 	const batch = value as Record<string, unknown>;
 	if (batch["operation"] === "crm.customer.write")
 		return customerBatch(batch);
-	if (batch["operation"] === "crm.proposal.change") return proposalBatch(batch);
+	if (batch["operation"] === "crm.proposal.change")
+		return proposalBatch(batch);
 	if (batch["operation"] === "crm.satisfaction.question.write")
 		return questionBatch(batch);
 	const generation = batch["operation"] === "crm.campaign.generate";
@@ -180,7 +313,11 @@ function parseBatch(value: unknown): Batch {
 	const permitted = generation
 		? new Set(generationTables)
 		: finish
-			? new Set([...finishTables, ...proposalTables, ...(survey ? surveyTables : [])])
+			? new Set([
+					...finishTables,
+					...proposalTables,
+					...(survey ? surveyTables : []),
+				])
 			: allowedTables;
 	const required = generation
 		? generationTables
@@ -218,14 +355,31 @@ function parseBatch(value: unknown): Batch {
 			(table) => !(batch["tables"] as unknown[]).includes(table),
 		) ||
 		!Array.isArray(batch["statements"]) ||
-		(finish ? batch["statements"].length < (survey ? 5 : 3) || batch["statements"].length > (survey ? 47 : 45) : batch["statements"].length !== 2)
+		(finish
+			? batch["statements"].length < (survey ? 5 : 3) ||
+				batch["statements"].length > (survey ? 47 : 45)
+			: batch["statements"].length !== 2)
 	)
 		return invalid();
 	const baseCount = finish ? (survey ? 5 : 3) : 2;
-	const extensions = finish && batch["statements"].length > baseCount ? finishProposalStatements(batch["statements"].slice(baseCount), Number(batch["scheduleId"])) : [];
-	if (["propostas","propostas_compras","crm_proposal_events"].some(table => (batch["tables"] as string[]).includes(table) !== Boolean(extensions.length))) return invalid();
-	const statements = batch["statements"].slice(0, baseCount).map(
-		(input: unknown, index: number): Statement => {
+	const extensions =
+		finish && batch["statements"].length > baseCount
+			? finishProposalStatements(
+					batch["statements"].slice(baseCount),
+					Number(batch["scheduleId"]),
+				)
+			: [];
+	if (
+		["propostas", "propostas_compras", "crm_proposal_events"].some(
+			(table) =>
+				(batch["tables"] as string[]).includes(table) !==
+				Boolean(extensions.length),
+		)
+	)
+		return invalid();
+	const statements = batch["statements"]
+		.slice(0, baseCount)
+		.map((input: unknown, index: number): Statement => {
 			if (!input || typeof input !== "object" || Array.isArray(input))
 				return invalid();
 			const statement = input as Record<string, unknown>;
@@ -318,8 +472,8 @@ function parseBatch(value: unknown): Batch {
 				params,
 				expectAffectedRows: Number(statement["expectAffectedRows"]),
 			};
-		},
-	);
+		});
+	if(survey)validateSatisfactionEffects(statements,batch["surveyQuestions"] as {id:number;description:string}[],Number(batch["scheduleId"]));
 	statements.push(...extensions);
 	return {
 		operation: generation
@@ -399,7 +553,12 @@ export function createTenantTransactionsRouter(
 		try {
 			if (req.body?.operation === "crm.administration.transfer") {
 				const command = parseTransfer(req.body);
-				const result = await database().transaction(req.params["instance"]!, command.operation, transferTables, tx => transferCustomers(tx, command));
+				const result = await database().transaction(
+					req.params["instance"]!,
+					command.operation,
+					transferTables,
+					(tx) => transferCustomers(tx, command),
+				);
 				return res.json({ data: result });
 			}
 			const batch = parseBatch(req.body);
@@ -440,9 +599,22 @@ export function createTenantTransactionsRouter(
 												"campanhas_clientes",
 												"telephony_schedule_edits",
 											];
-					if (batch.operation === "crm.customer.write" && batch.syncPhones) mutated.push("fones_campanha_cli");
-					if (batch.operation === "crm.proposal.change") mutated.splice(0,mutated.length,"propostas","crm_proposal_events");
-					else if(batch.tables.includes("propostas")) mutated.push("propostas","crm_proposal_events");
+					if (
+						batch.operation === "crm.customer.write" &&
+						batch.syncPhones
+					)
+						mutated.push("fones_campanha_cli");
+					if (batch.importReceipt)
+						mutated.push("crm_import_receipts");
+					if (batch.operation === "crm.proposal.change")
+						mutated.splice(
+							0,
+							mutated.length,
+							"propostas",
+							"crm_proposal_events",
+						);
+					else if (batch.tables.includes("propostas"))
+						mutated.push("propostas", "crm_proposal_events");
 					const triggers = await tx.execute<unknown[]>(
 						`SELECT TRIGGER_NAME FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = DATABASE() AND EVENT_OBJECT_TABLE IN (${mutated.map(() => "?").join(", ")}) LIMIT 1`,
 						mutated,
@@ -602,6 +774,16 @@ export function createTenantTransactionsRouter(
 							throw new TenantDatabaseError(
 								"TENANT_CUSTOMER_POLICY_UNAVAILABLE",
 							);
+						if (batch.importReceipt) {
+							const existingId = await findImportReceipt(
+								tx,
+								batch.importReceipt,
+							);
+							if (existingId !== null)
+								return [
+									{ affectedRows: 1, insertId: existingId },
+								];
+						}
 						if (batch.customerId) {
 							const rows = await tx.execute<unknown[]>(
 								"SELECT CODIGO FROM clientes WHERE CODIGO=? FOR UPDATE",
@@ -658,9 +840,25 @@ export function createTenantTransactionsRouter(
 								: {}),
 						});
 					}
-					if (batch.operation === "crm.customer.write" && batch.syncPhones) {
-						const customerId = batch.customerId || (results[0] as { insertId?: number }).insertId;
+					if (
+						batch.operation === "crm.customer.write" &&
+						batch.syncPhones
+					) {
+						const customerId =
+							batch.customerId ||
+							(results[0] as { insertId?: number }).insertId;
 						await synchronizeCustomerPhones(tx, Number(customerId));
+					}
+					if (batch.importReceipt) {
+						const customerId = Number(
+							(results[0] as { insertId?: number } | undefined)
+								?.insertId,
+						);
+						await writeImportReceipt(
+							tx,
+							batch.importReceipt,
+							customerId,
+						);
 					}
 					return results;
 				},
@@ -677,9 +875,15 @@ export function createTenantTransactionsRouter(
 			return reject(
 				safe.code === "TENANT_TRANSACTION_INVALID_REQUEST"
 					? 400
-					: safe.code === "TENANT_TRANSACTION_AFFECTED_ROWS"
-						? 409
-						: 503,
+					: safe.code === "TENANT_IMPORT_FORBIDDEN"
+						? 403
+						: [
+									"TENANT_TRANSACTION_AFFECTED_ROWS",
+									"TENANT_IMPORT_DUPLICATE",
+									"TENANT_IMPORT_OPERATION_REUSED",
+							  ].includes(safe.code)
+							? 409
+							: 503,
 				safe.code,
 				safe.outcome,
 			);

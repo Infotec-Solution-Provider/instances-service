@@ -6,7 +6,7 @@ const { tenantDatabaseConfig } = require("../dist/tenant-database/config");
 const { CrmUnitsService } = require("../dist/crm-units/service");
 
 // Opt-in only: local disposable schemas, never a tenant registry or environment credentials.
-for (const port of [13328, 13329]) {
+for (const port of require("./isolated-mysql-ports.cjs")("CRM_UNITS_MYSQL_PORTS", [13328, 13329])) {
   test(`CRM units on isolated MySQL ${port}`, { skip: process.env.RUN_CRM_UNITS_MYSQL !== "true" }, async () => {
     const admin = await mysql.createConnection({ host: "127.0.0.1", port, user: "root" });
     const prefix = `crm_units_${process.pid}_${Date.now()}`;

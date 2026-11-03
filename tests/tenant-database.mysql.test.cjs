@@ -19,10 +19,8 @@ function deferred() {
 	return { promise, resolve };
 }
 
-for (const [version, port] of [
-	["8.0", 13318],
-	["5.5", 13355],
-]) {
+for (const [index, port] of require("./isolated-mysql-ports.cjs")("TENANT_MYSQL_PORTS", [13318, 13355]).entries()) {
+	const version = process.env.TENANT_MYSQL_PORTS ? `fixture ${port}` : index === 0 ? "8.0" : "5.5";
 	test(
 		`MySQL ${version}: tenant transactions, Unicode, isolation, contention and ambiguous commit`,
 		{ skip: !enabled },
