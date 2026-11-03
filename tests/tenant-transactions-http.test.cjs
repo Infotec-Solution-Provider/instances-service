@@ -52,6 +52,10 @@ async function fixture(t, options = {}) {
 					if (/^INSERT INTO `?clientes`?\s/.test(sql)) return { affectedRows: 1, insertId: 41 };
 					if (/^SELECT CODIGO FROM parametros/.test(sql)) return options.missingPolicy ? [] : [{ CODIGO: 1 }];
 					if (/^SELECT CODIGO FROM clientes WHERE CODIGO=\? FOR UPDATE/.test(sql)) return [{ CODIGO: params[0] }];
+					if (sql.startsWith("SELECT operation_id FROM crm_proposal_events")) return options.usedProposalOperation ? [{operation_id:params[0]}] : [];
+					if (sql.startsWith("SELECT CODIGO FROM propostas")) return [{CODIGO:params[0]}];
+					if (sql.startsWith("SELECT PROPOSTA FROM propostas_compras")) return [];
+					if (sql.includes("information_schema.KEY_COLUMN_USAGE")) return options.proposalReferences??[];
 					if (sql === "SELECT CODIGO FROM campanhas WHERE CODIGO=? FOR UPDATE")
 						return options.missingCampaign ? [] : [{ CODIGO: params[0] }];
 					if (sql === "SELECT CODIGO FROM campanhas_clientes WHERE CODIGO=? FOR UPDATE")
@@ -326,4 +330,131 @@ test("commit uncertainty and untyped failures are sanitized without request data
 		assert.doesNotMatch(JSON.stringify(result), /password|private|SQL/);
 		assert.equal(f.transactions.length, 1);
 	}
+});
+
+const proposalSql = require("../dist/crm-proposals/sql");
+function proposalChange() {
+	return {
+		operation: "crm.proposal.change",
+		scheduleId: 41,
+		tables: proposalSql.proposalTables,
+		statements: [
+			{
+				sql: proposalSql.changeValueSql,
+				params: ["120.75", 11, 41, "100.25", "ATIVA", 7, 0],
+				expectAffectedRows: 1,
+			},
+			{
+				sql: proposalSql.eventSql,
+				params: [
+					"177e179c-08b9-44e4-adb9-7f34956f342f",
+					"a".repeat(64),
+					11,
+					41,
+					7,
+					"UPDATE",
+					"100.25",
+					"120.75",
+					"ATIVA",
+					"ATIVA",
+					"Revisão",
+					1,
+					3,
+				],
+				expectAffectedRows: 1,
+			},
+		],
+	};
+}
+test("proposal mutation uses exact SQL, serializes operation, row and purchase links before CAS and audit", async (t) => {
+	const f = await fixture(t);
+	assert.equal((await f.send(proposalChange())).status, 200);
+	assert.match(f.queries[0].sql, /information_schema.TRIGGERS/);
+	assert.equal(
+		f.queries[1].sql,
+		"SELECT operation_id FROM crm_proposal_events WHERE operation_id=? FOR UPDATE",
+	);
+	assert.equal(
+		f.queries[2].sql,
+		"SELECT CODIGO FROM propostas WHERE CODIGO=? FOR UPDATE",
+	);
+	assert.equal(
+		f.queries[3].sql,
+		"SELECT PROPOSTA FROM propostas_compras WHERE PROPOSTA=? FOR UPDATE",
+	);
+	assert.equal(f.queries[4].sql, proposalSql.changeValueSql);
+	assert.equal(f.queries[5].sql, proposalSql.eventSql);
+});
+test("proposal commands reject arbitrary SQL, cross-wired audit, missing capability and reused operations", async (t) => {
+	const f = await fixture(t);
+	for (const mutate of [
+		(b) => (b.statements[0].sql = "UPDATE propostas SET VALOR=0"),
+		(b) => (b.statements[1].params[2] = 99),
+		(b) => (b.tables = b.tables.filter((t) => t !== "crm_proposal_events")),
+		(b) => (b.statements[0].sql += "; DELETE FROM clientes"),
+		(b) => b.statements[0].params.push("extra"),
+	]) {
+		const b = proposalChange();
+		mutate(b);
+		assert.equal((await f.send(b)).status, 400);
+	}
+	assert.equal(f.transactions.length, 0);
+	const used = await fixture(t, { usedProposalOperation: true });
+	assert.equal((await used.send(proposalChange())).status, 409);
+	assert.equal(used.queries.length, 2);
+	const stale = await fixture(t, { affectedRows: 0 });
+	assert.equal((await stale.send(proposalChange())).status, 409);
+	assert.ok(!stale.queries.some((q) => q.sql === proposalSql.eventSql));
+});
+test("proposal creation extends finalization without a general SQL statement escape", async (t) => {
+	const f = await fixture(t);
+	const b = {
+		operation: "telephony.schedule.finish",
+		scheduleId: 41,
+		tables: [
+			"campanhas_clientes",
+			"historico_cli",
+			"telephony_schedule_finishes",
+			"resultados",
+			"operadores",
+			"propostas",
+			"propostas_compras",
+			"crm_proposal_events",
+		],
+		statements: [
+			{
+				sql: "UPDATE campanhas_clientes SET RESULTADO=? WHERE CODIGO=?",
+				params: [9, 41],
+				expectAffectedRows: 1,
+			},
+			{
+				sql: "INSERT INTO historico_cli (CC_CODIGO) VALUES (?)",
+				params: [41],
+				expectAffectedRows: 1,
+			},
+			{
+				sql: "INSERT INTO telephony_schedule_finishes (schedule_id) VALUES (?)",
+				params: [41],
+				expectAffectedRows: 1,
+			},
+			{
+				sql: proposalSql.createSql,
+				params: [41, "100.25", 41],
+				expectAffectedRows: 1,
+			},
+			{
+				sql: proposalSql.createEventSql,
+				params: ["operation", "hash", 7, 41],
+				expectAffectedRows: 1,
+			},
+		],
+	};
+	assert.equal((await f.send(b)).status, 200);
+	b.statements[3].sql = "DELETE FROM propostas";
+	assert.equal((await f.send(b)).status, 400);
+});
+test("proposal deletion refuses unreviewed foreign keys before any destructive statement",async t=>{
+ const f=await fixture(t,{proposalReferences:[{local_schema:1,TABLE_NAME:"other_history",COLUMN_NAME:"proposal",REFERENCED_COLUMN_NAME:"CODIGO"}]});
+ const b=proposalChange();b.statements[0]={sql:proposalSql.deleteSql,params:[11,41,"100.25","ATIVA",7,0],expectAffectedRows:1};b.statements[1].params[5]="DELETE";b.statements[1].params[7]=null;b.statements[1].params[9]=null;
+ const result=await f.send(b);assert.equal(result.status,503);assert.equal(result.body.code,"TENANT_PROPOSAL_UNREVIEWED_REFERENCES");assert.ok(!f.queries.some(q=>q.sql===proposalSql.deleteSql));
 });
