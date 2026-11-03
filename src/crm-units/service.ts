@@ -74,6 +74,33 @@ function complete(rows: Row[]) {
 		)
 	);
 }
+function nextCode(rows: Row[]) {
+	return number(
+		rows.reduce(
+			(max, row) => Math.max(max, Number(row["CODIGO"]) || 0),
+			0,
+		) + 1,
+	);
+}
+type Reason = { code: string; message: string };
+const capability = (reasons: Reason[] = []) => ({
+	allowed: reasons.length === 0,
+	reasons,
+});
+function periodReasons(unit: Row): Reason[] {
+	try {
+		thresholds(unit);
+		return [];
+	} catch {
+		return [
+			{
+				code: "UNIT_PERIODS_INVALID",
+				message:
+					"Os períodos da unidade precisam ser válidos: o limite de inativos recentes deve ser menor que o de antigos.",
+			},
+		];
+	}
+}
 function same(a: Row, b: Row, keys = Object.keys(a)) {
 	return keys.every((k) => a[k] === b[k]);
 }
@@ -97,6 +124,14 @@ export class CrmUnitsService {
 		private readonly database: Pick<TenantDatabase, "transaction">,
 	) {}
 	async execute(tenant: string, input: unknown) {
+		if (
+			input &&
+			typeof input === "object" &&
+			!Array.isArray(input) &&
+			(input as Record<string, unknown>)["action"] === "units" &&
+			(input as Record<string, unknown>)["command"] === "member-create"
+		)
+			return this.createMember(tenant, input);
 		const body = object(input, [
 			"action",
 			"command",
@@ -105,15 +140,24 @@ export class CrmUnitsService {
 			"campaigns",
 			"changes",
 			"expected",
+			"operationMode",
+			"organizationalUnitId",
 		]);
 		if (body["action"] !== "units") return fail();
 		const command = body["command"];
 		const permitted: Record<string, string[]> = {
 			list: ["action", "command"],
 			detail: ["action", "command", "id"],
+			"campaign-context": ["action", "command", "id"],
 			create: ["action", "command", "fields", "campaigns"],
 			patch: ["action", "command", "id", "changes", "expected"],
-			"campaign-create": ["action", "command", "fields"],
+			"campaign-create": [
+				"action",
+				"command",
+				"fields",
+				"operationMode",
+				"organizationalUnitId",
+			],
 			"campaign-patch": [
 				"action",
 				"command",
@@ -125,11 +169,13 @@ export class CrmUnitsService {
 		if (typeof command !== "string" || !Object.hasOwn(permitted, command))
 			return fail();
 		object(body, permitted[command]!);
-		const writing = !["list", "detail"].includes(command);
+		const writing = !["list", "detail", "campaign-context"].includes(
+			command,
+		);
 		return this.database.transaction(
 			tenant,
 			"crm.catalog-ordering.units",
-			["parametros", "unidades", "campanhas"],
+			["parametros", "unidades", "campanhas", "crm_campaign_policies"],
 			async (tx) => {
 				// Same first lock as ordering/customer commands. Range locks prevent duplicate unit/type inserts.
 				const policy = await tx.execute<Row[]>(
@@ -148,7 +194,7 @@ export class CrmUnitsService {
 						extra: string;
 					}[]
 				>(
-					"SELECT TABLE_NAME AS tableName,COLUMN_NAME AS name,COLUMN_TYPE AS type,CHARACTER_MAXIMUM_LENGTH AS maxLength,IS_NULLABLE AS nullable,COLUMN_DEFAULT AS defaultValue,EXTRA AS extra FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN ('unidades','campanhas') ORDER BY ORDINAL_POSITION",
+					"SELECT TABLE_NAME AS tableName,COLUMN_NAME AS name,COLUMN_TYPE AS type,CHARACTER_MAXIMUM_LENGTH AS maxLength,IS_NULLABLE AS nullable,COLUMN_DEFAULT AS defaultValue,EXTRA AS extra FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN ('unidades','campanhas','crm_campaign_policies') ORDER BY ORDINAL_POSITION",
 				);
 				for (const [table, required] of [
 					["unidades", unitFields],
@@ -163,19 +209,33 @@ export class CrmUnitsService {
 							"PRIORIDADE",
 						],
 					],
+					[
+						"crm_campaign_policies",
+						[
+							"CAMPAIGN_ID",
+							"UNIT_ID",
+							"OPERATION_MODE",
+							"OVERLAP_POLICY",
+							"ASSIGNMENT_POLICY",
+							"CHANGE_EFFECT",
+						],
+					],
 				] as const) {
 					if (
 						required.some(
 							(k) =>
 								!columns.some(
 									(c) =>
-										c.tableName === table && c.name === k,
+										c.tableName === table &&
+										c.name.toUpperCase() === k,
 								),
 						)
 					)
 						return fail("TENANT_ORDERING_SCHEMA_UNAVAILABLE");
 				}
 				// A missing/changed tenant column never causes fallback to a different schema.
+				for (const column of columns)
+					column.name = column.name.toUpperCase();
 				const unitColumns = columns.filter(
 					(c) =>
 						c.tableName === "unidades" &&
@@ -260,17 +320,151 @@ export class CrmUnitsService {
 				);
 				if (units.length > 20000 || campaigns.length > 20000)
 					return fail("TENANT_ORDERING_TOO_LARGE");
-				const view = (unit: Row) => ({
-					...unit,
-					campaignCount: campaigns.filter(
-						(c) => c["UNIDADE"] === unit["CODIGO"],
-					).length,
-					activationAvailable: complete(
-						campaigns.filter(
-							(c) => c["UNIDADE"] === unit["CODIGO"],
+				const policies = await tx.execute<Row[]>(
+					"SELECT campaign_id,unit_id,operation_mode,overlap_policy,assignment_policy,change_effect FROM crm_campaign_policies ORDER BY campaign_id LIMIT 20001 FOR UPDATE",
+				);
+				if (
+					policies.length > 20000 ||
+					policies.some(
+						(p) =>
+							p["operation_mode"] !== "audience_manual" ||
+							p["overlap_policy"] !== "allow" ||
+							p["assignment_policy"] !== "explicit_operator" ||
+							p["change_effect"] !== "future_batches" ||
+							!campaigns.some(
+								(c) =>
+									c["CODIGO"] === p["campaign_id"] &&
+									c["UNIDADE"] == null &&
+									c["TIPO"] == null,
+							) ||
+							!units.some((u) => u["CODIGO"] === p["unit_id"]),
+					)
+				)
+					return fail("TENANT_ORDERING_SCHEMA_UNAVAILABLE");
+				const policyFor = (campaign: Row) =>
+					policies.find(
+						(p) => p["campaign_id"] === campaign["CODIGO"],
+					);
+				const unitFor = (campaign: Row) =>
+					units.find(
+						(u) =>
+							u["CODIGO"] ===
+							(policyFor(campaign)?.["unit_id"] ??
+								campaign["UNIDADE"]),
+					);
+				const associated = (unit: Row) =>
+					campaigns.filter(
+						(c) => unitFor(c)?.["CODIGO"] === unit["CODIGO"],
+					);
+				const cycle = (unit: Row) =>
+					campaigns.filter((c) => c["UNIDADE"] === unit["CODIGO"]);
+				const cycleReasons = (unit: Row): Reason[] => [
+					...(!complete(cycle(unit))
+						? [
+								{
+									code: "CYCLE_COMPOSITION_INCOMPLETE",
+									message:
+										"Complete as quatro campanhas do ciclo de compra para retomar suas campanhas automáticas.",
+								},
+							]
+						: []),
+					...periodReasons(unit),
+				];
+				const renameUnitReasons = (unit: Row): Reason[] =>
+					cycle(unit).some(
+						(c) =>
+							c["NOME"] === `${unit["DESCRICAO"]} - ${c["TIPO"]}`,
+					)
+						? [
+								{
+									code: "LEGACY_NAME_DEPENDENCY",
+									message:
+										"Esta unidade tem campanhas com nomes usados pelo legado. A alteração exige migração desses consumidores.",
+								},
+							]
+						: [];
+				const mode = (campaign: Row) =>
+					policyFor(campaign)
+						? "audience-manual"
+						: campaign["UNIDADE"] != null
+							? "purchase-cycle"
+							: "legacy-unassigned";
+				const campaignCapabilities = (campaign: Row) => {
+					const linked = unitFor(campaign);
+					const resumeReasons = policyFor(campaign)
+						? []
+						: linked
+							? cycleReasons(linked)
+							: [
+									{
+										code: "UNIT_UNAVAILABLE",
+										message:
+											"A campanha não possui unidade e política operacional válidas para retomada.",
+									},
+								];
+					const managed =
+						typeof campaign["SQL_CAMPANHA"] === "string" &&
+						campaign["SQL_CAMPANHA"].startsWith(
+							"/* inpulse-crm-selection-v1:",
+						);
+					return {
+						edit: capability(),
+						rename: capability(
+							!policyFor(campaign) &&
+								linked &&
+								campaign["NOME"] ===
+									`${linked["DESCRICAO"]} - ${campaign["TIPO"]}`
+								? [
+										{
+											code: "LEGACY_NAME_DEPENDENCY",
+											message:
+												"O nome desta campanha é usado por consumidores legados. A alteração exige migração desses consumidores.",
+										},
+									]
+								: [],
 						),
-					),
-				});
+						resume: capability(resumeReasons),
+						pause: capability(),
+						generate: capability(
+							managed
+								? []
+								: [
+										{
+											code: "PUBLIC_NOT_MANAGED",
+											message:
+												"Salve um público estruturado na seção Público antes de preparar um lote. SQL legado não será convertido automaticamente.",
+										},
+									],
+						),
+					};
+				};
+				const view = (unit: Row) => {
+					const cycleCount = cycle(unit).length,
+						manualCount = associated(unit).filter((c) =>
+							policyFor(c),
+						).length;
+					return {
+						...unit,
+						campaignCount: associated(unit).length,
+						cycleCampaignCount: cycleCount,
+						manualCampaignCount: manualCount,
+						activationAvailable: cycleReasons(unit).length === 0,
+						mode: cycleCount
+							? manualCount
+								? "mixed"
+								: "purchase-cycle"
+							: manualCount
+								? "audience-manual"
+								: "unconfigured",
+						missingTypes: campaignTypes.filter(
+							(t) => !cycle(unit).some((c) => c["TIPO"] === t),
+						),
+						pendingReasons: cycleCount ? cycleReasons(unit) : [],
+						capabilities: {
+							rename: capability(renameUnitReasons(unit)),
+						},
+					};
+				};
 				if (command === "list")
 					return {
 						data: units.map(view),
@@ -280,23 +474,26 @@ export class CrmUnitsService {
 					const keys = await tx.execute<
 						{ tableName: string; name: string }[]
 					>(
-						"SELECT TABLE_NAME AS tableName,COLUMN_NAME AS name FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN ('unidades','campanhas') AND INDEX_NAME='PRIMARY' ORDER BY TABLE_NAME,SEQ_IN_INDEX",
+						"SELECT TABLE_NAME AS tableName,COLUMN_NAME AS name FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN ('unidades','campanhas','crm_campaign_policies') AND INDEX_NAME='PRIMARY' ORDER BY TABLE_NAME,SEQ_IN_INDEX",
 					);
 					if (
-						["unidades", "campanhas"].some(
+						["unidades", "campanhas", "crm_campaign_policies"].some(
 							(t) =>
 								keys.filter((k) => k.tableName === t).length !==
 									1 ||
 								!keys.some(
 									(k) =>
 										k.tableName === t &&
-										k.name === "CODIGO",
+										k.name.toUpperCase() ===
+											(t === "crm_campaign_policies"
+												? "CAMPAIGN_ID"
+												: "CODIGO"),
 								),
 						)
 					)
 						return fail("TENANT_ORDERING_SCHEMA_UNAVAILABLE");
 					const triggers = await tx.execute<unknown[]>(
-						"SELECT TRIGGER_NAME FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=DATABASE() AND EVENT_OBJECT_TABLE IN ('unidades','campanhas') LIMIT 1",
+						"SELECT TRIGGER_NAME FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=DATABASE() AND EVENT_OBJECT_TABLE IN ('unidades','campanhas','crm_campaign_policies') LIMIT 1",
 					);
 					if (triggers.length)
 						return fail("TENANT_TRANSACTION_UNREVIEWED_TRIGGERS");
@@ -309,11 +506,30 @@ export class CrmUnitsService {
 				if (command === "detail") {
 					if (!unit) return fail("TENANT_ORDERING_UNIT_UNAVAILABLE");
 					return {
-						data: unit,
-						campaigns: campaigns.filter(
-							(c) => c["UNIDADE"] === unitId,
+						data: view(unit),
+						campaigns: associated(unit),
+						campaignModes: Object.fromEntries(
+							associated(unit).map((c) => [
+								String(c["CODIGO"]),
+								mode(c),
+							]),
 						),
 						supportedTypes: campaignTypes,
+					};
+				}
+				if (command === "campaign-context") {
+					const campaign = campaigns.find(
+						(c) => c["CODIGO"] === unitId,
+					);
+					if (!campaign)
+						return fail("TENANT_ORDERING_UNIT_UNAVAILABLE");
+					const linked = unitFor(campaign);
+					return {
+						campaign,
+						unit: linked ? view(linked) : null,
+						operationMode: mode(campaign),
+						policy: policyFor(campaign) ?? null,
+						capabilities: campaignCapabilities(campaign),
 					};
 				}
 				if (command === "patch") {
@@ -331,6 +547,11 @@ export class CrmUnitsService {
 					)
 						return fail("TENANT_ORDERING_CHANGED");
 					const next = text(changes["DESCRICAO"], 50);
+					if (
+						next !== unit["DESCRICAO"] &&
+						renameUnitReasons(unit).length
+					)
+						return fail("TENANT_ORDERING_LEGACY_NAME_DEPENDENCY");
 					validate("unidades", { DESCRICAO: next });
 					const duplicates = await tx.execute<Row[]>(
 						"SELECT CODIGO FROM unidades WHERE DESCRICAO=? AND CODIGO<>? LIMIT 1 FOR UPDATE",
@@ -343,7 +564,11 @@ export class CrmUnitsService {
 					);
 					return { ...unit, DESCRICAO: next };
 				}
-				const prepare = (raw: unknown, id: number): Row => {
+				const prepare = (
+					raw: unknown,
+					id: number,
+					unitDescription: string,
+				): Row => {
 					const fields = object(
 						raw,
 						campaignFields.filter(
@@ -356,14 +581,23 @@ export class CrmUnitsService {
 								].includes(k),
 						),
 					) as Row;
-					number(fields["CODIGO"]);
-					text(fields["NOME"], 150);
+					fields["CODIGO"] =
+						fields["CODIGO"] === undefined
+							? nextCode(campaigns)
+							: number(fields["CODIGO"]);
 					if (
 						!campaignTypes.includes(
 							fields["TIPO"] as (typeof campaignTypes)[number],
 						)
 					)
 						return fail();
+					const canonicalName = `${unitDescription} - ${fields["TIPO"]}`;
+					if (
+						fields["NOME"] !== undefined &&
+						text(fields["NOME"], 150) !== canonicalName
+					)
+						return fail("TENANT_ORDERING_LEGACY_NAME_REQUIRED");
+					fields["NOME"] = text(canonicalName, 150);
 					if (
 						fields["PAUSADA"] !== undefined &&
 						fields["PAUSADA"] !== "SIM"
@@ -403,7 +637,11 @@ export class CrmUnitsService {
 				};
 				if (command === "create") {
 					const fields = object(body["fields"], unitFields) as Row;
-					const id = number(fields["CODIGO"]);
+					const id =
+						fields["CODIGO"] === undefined
+							? nextCode(units)
+							: number(fields["CODIGO"]);
+					fields["CODIGO"] = id;
 					const description = text(fields["DESCRICAO"], 50);
 					thresholds(fields);
 					validate("unidades", fields);
@@ -416,14 +654,15 @@ export class CrmUnitsService {
 						duplicates.length
 					)
 						return fail("TENANT_DUPLICATE_KEY");
+					const initialCampaigns = body["campaigns"] ?? [];
 					if (
-						!Array.isArray(body["campaigns"]) ||
-						body["campaigns"].length > 4
+						!Array.isArray(initialCampaigns) ||
+						initialCampaigns.length > 4
 					)
 						return fail();
 					const prepared: Row[] = [];
-					for (const raw of body["campaigns"]) {
-						const row = prepare(raw, id);
+					for (const raw of initialCampaigns) {
+						const row = prepare(raw, id, description);
 						prepared.push(row);
 						campaigns.push(row);
 					}
@@ -447,11 +686,72 @@ export class CrmUnitsService {
 								].includes(k),
 						),
 					);
+					if (body["operationMode"] === "audience-manual") {
+						const id = number(body["organizationalUnitId"]);
+						if (!units.some((u) => u["CODIGO"] === id))
+							return fail("TENANT_ORDERING_UNIT_UNAVAILABLE");
+						if (
+							fields["UNIDADE"] != null ||
+							fields["TIPO"] != null ||
+							(fields["PAUSADA"] !== undefined &&
+								fields["PAUSADA"] !== "SIM")
+						)
+							return fail();
+						const row: Row = {
+							...(fields as Row),
+							CODIGO:
+								fields["CODIGO"] === undefined
+									? nextCode(campaigns)
+									: number(fields["CODIGO"]),
+							NOME: text(fields["NOME"], 150),
+							UNIDADE: null,
+							TIPO: null,
+							PAUSADA: "SIM",
+							PRIORIDADE: number(
+								campaigns.reduce(
+									(n, c) =>
+										Math.max(
+											n,
+											Number(c["PRIORIDADE"]) || 0,
+										),
+									0,
+								) + 1,
+							),
+						};
+						for (const column of campaignColumns)
+							if (
+								column.type === "datetime" &&
+								column.nullable === "YES" &&
+								String(column.defaultValue).startsWith(
+									"0000-",
+								) &&
+								!Object.hasOwn(row, column.name)
+							)
+								row[column.name] = null;
+						validate("campanhas", row);
+						await insert(tx, "campanhas", row);
+						await tx.execute(
+							"INSERT INTO crm_campaign_policies (campaign_id,unit_id,operation_mode,overlap_policy,assignment_policy,change_effect) VALUES (?,?,'audience_manual','allow','explicit_operator','future_batches')",
+							[row["CODIGO"], id],
+						);
+						return row;
+					}
+					if (
+						body["operationMode"] !== undefined ||
+						body["organizationalUnitId"] !== undefined
+					)
+						return fail();
 					const id = number(fields["UNIDADE"]);
 					if (!units.some((u) => u["CODIGO"] === id))
 						return fail("TENANT_ORDERING_UNIT_UNAVAILABLE");
 					const { UNIDADE: _, ...rest } = fields;
-					const row = prepare(rest, id);
+					const row = prepare(
+						rest,
+						id,
+						String(
+							units.find((u) => u["CODIGO"] === id)!["DESCRICAO"],
+						),
+					);
 					await insert(tx, "campanhas", row);
 					return row;
 				}
@@ -498,21 +798,30 @@ export class CrmUnitsService {
 					changes["PAUSADA"] === "NAO" &&
 					current["PAUSADA"] !== "NAO"
 				) {
-					const linked = units.find(
-						(u) => u["CODIGO"] === current["UNIDADE"],
-					);
-					if (
-						!linked ||
-						!complete(
-							campaigns.filter(
-								(c) => c["UNIDADE"] === linked["CODIGO"],
-							),
+					if (!policyFor(current)) {
+						const linked = units.find(
+							(u) => u["CODIGO"] === current["UNIDADE"],
+						);
+						if (
+							!linked ||
+							!complete(
+								campaigns.filter(
+									(c) => c["UNIDADE"] === linked["CODIGO"],
+								),
+							)
 						)
-					)
-						return fail("TENANT_ORDERING_COMPOSITION_PENDING");
-					thresholds(linked);
+							return fail("TENANT_ORDERING_COMPOSITION_PENDING");
+						thresholds(linked);
+					}
 				}
-				if (Object.hasOwn(changes, "NOME")) text(changes["NOME"], 150);
+				if (Object.hasOwn(changes, "NOME")) {
+					text(changes["NOME"], 150);
+					if (
+						changes["NOME"] !== current["NOME"] &&
+						!campaignCapabilities(current).rename.allowed
+					)
+						return fail("TENANT_ORDERING_LEGACY_NAME_DEPENDENCY");
+				}
 				validate("campanhas", changes);
 				await tx.execute(
 					`UPDATE campanhas SET ${Object.keys(changes)
@@ -521,6 +830,68 @@ export class CrmUnitsService {
 					[...Object.values(changes), unitId],
 				);
 				return { ...current, ...changes };
+			},
+		);
+	}
+	private async createMember(tenant: string, input: unknown) {
+		const body = object(input, ["action", "command", "id", "fields"]),
+			campaign = number(body["id"]),
+			fields = object(body["fields"], ["OPERADOR"]),
+			operator = number(fields["OPERADOR"]);
+		return this.database.transaction(
+			tenant,
+			"crm.catalog-ordering.member-create",
+			["parametros", "campanhas", "campanhasxoperadores", "operadores"],
+			async (tx) => {
+				const policy = await tx.execute<Row[]>(
+					"SELECT CODIGO FROM parametros ORDER BY CODIGO LIMIT 2 FOR UPDATE",
+				);
+				if (policy.length !== 1)
+					return fail("TENANT_ORDERING_POLICY_UNAVAILABLE");
+				const keys = await tx.execute<{ name: string }[]>(
+					"SELECT COLUMN_NAME AS name FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='campanhasxoperadores' AND INDEX_NAME='PRIMARY' ORDER BY SEQ_IN_INDEX",
+				);
+				if (
+					keys.length !== 1 ||
+					keys[0]!.name.toUpperCase() !== "CODIGO"
+				)
+					return fail("TENANT_ORDERING_SCHEMA_UNAVAILABLE");
+				const triggers = await tx.execute<unknown[]>(
+					"SELECT TRIGGER_NAME FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=DATABASE() AND EVENT_OBJECT_TABLE='campanhasxoperadores' LIMIT 1",
+				);
+				if (triggers.length)
+					return fail("TENANT_TRANSACTION_UNREVIEWED_TRIGGERS");
+				const campaigns = await tx.execute<Row[]>(
+					"SELECT CODIGO FROM campanhas WHERE CODIGO=? LIMIT 1 FOR UPDATE",
+					[campaign],
+				);
+				const operators = await tx.execute<Row[]>(
+					"SELECT CODIGO FROM operadores WHERE CODIGO=? AND ATIVO='SIM' LIMIT 1 FOR UPDATE",
+					[operator],
+				);
+				if (campaigns.length !== 1 || operators.length !== 1)
+					return fail("TENANT_ORDERING_UNIT_UNAVAILABLE");
+				const members = await tx.execute<Row[]>(
+					"SELECT CODIGO,CAMPANHA,OPERADOR FROM campanhasxoperadores ORDER BY CODIGO LIMIT 20001 FOR UPDATE",
+				);
+				if (members.length > 20000)
+					return fail("TENANT_ORDERING_TOO_LARGE");
+				if (
+					members.some(
+						(m) =>
+							m["CAMPANHA"] === campaign &&
+							m["OPERADOR"] === operator,
+					)
+				)
+					return fail("TENANT_DUPLICATE_KEY");
+				const id = nextCode(members);
+				const result = await tx.execute<{ affectedRows: number }>(
+					"INSERT INTO campanhasxoperadores (CODIGO,CAMPANHA,OPERADOR) VALUES (?,?,?)",
+					[id, campaign, operator],
+				);
+				if (result.affectedRows !== 1)
+					return fail("TENANT_TRANSACTION_AFFECTED_ROWS");
+				return { CODIGO: id, CAMPANHA: campaign, OPERADOR: operator };
 			},
 		);
 	}

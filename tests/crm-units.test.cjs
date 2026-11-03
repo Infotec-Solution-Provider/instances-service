@@ -17,13 +17,13 @@ const fields = {
 };
 const campaign = {
 	CODIGO: 11,
-	NOME: "Clientes novos",
+	NOME: "Nova unidade - PROSPE",
 	TIPO: "PROSPE",
 	MAX_RESPOSTA: 300,
 	PAUSADA: "SIM",
 };
 function fixture() {
-	let state = { units: [structuredClone(unit)], campaigns: [] },
+	let state = { units: [structuredClone(unit)], campaigns: [], policies: [] },
 		failInsert = false,
 		missing = false,
 		triggers = false;
@@ -55,6 +55,14 @@ function fixture() {
 			MAX_RESPOSTA: "int",
 			DATA_INI: "datetime",
 		}),
+		...metadata("crm_campaign_policies", {
+			campaign_id: "int",
+			unit_id: "int",
+			operation_mode: "enum('audience_manual')",
+			overlap_policy: "enum('allow')",
+			assignment_policy: "enum('explicit_operator')",
+			change_effect: "enum('future_batches')",
+		}),
 	];
 	let queue = Promise.resolve();
 	const database = {
@@ -71,9 +79,17 @@ function fixture() {
 						if (sql.includes("information_schema.COLUMNS"))
 							return missing ? [] : columns;
 						if (sql.includes("information_schema.STATISTICS"))
-							return ["unidades", "campanhas"].map(
-								(tableName) => ({ tableName, name: "CODIGO" }),
-							);
+							return [
+								"unidades",
+								"campanhas",
+								"crm_campaign_policies",
+							].map((tableName) => ({
+								tableName,
+								name:
+									tableName === "crm_campaign_policies"
+										? "campaign_id"
+										: "CODIGO",
+							}));
 						if (sql.includes("information_schema.TRIGGERS"))
 							return triggers ? [{ name: "unknown" }] : [];
 						if (sql.includes("WHERE DESCRICAO=?"))
@@ -88,6 +104,21 @@ function fixture() {
 							return structuredClone(draft.units);
 						if (sql.includes("FROM campanhas ORDER BY"))
 							return structuredClone(draft.campaigns);
+						if (sql.includes("FROM crm_campaign_policies ORDER BY"))
+							return structuredClone(draft.policies);
+						if (
+							sql.startsWith("INSERT INTO crm_campaign_policies")
+						) {
+							draft.policies.push({
+								campaign_id: params[0],
+								unit_id: params[1],
+								operation_mode: "audience_manual",
+								overlap_policy: "allow",
+								assignment_policy: "explicit_operator",
+								change_effect: "future_batches",
+							});
+							return { affectedRows: 1 };
+						}
 						if (sql.startsWith("INSERT INTO")) {
 							const table = sql.includes("`unidades`")
 								? "units"
@@ -179,7 +210,12 @@ test("unit creation persists only selected campaigns, appends priority and never
 	assert.deepEqual(f.contexts[0], {
 		tenant: "tenant-a",
 		operation: "crm.catalog-ordering.units",
-		tables: ["parametros", "unidades", "campanhas"],
+		tables: [
+			"parametros",
+			"unidades",
+			"campanhas",
+			"crm_campaign_policies",
+		],
 	});
 	assert(
 		f.calls
@@ -187,7 +223,7 @@ test("unit creation persists only selected campaigns, appends priority and never
 			.every((c) => c.sql.endsWith("FOR UPDATE")),
 	);
 	const detail = await run(f, "detail", { id: 2 });
-	assert.equal(detail.campaigns[0].NOME, "Clientes novos");
+	assert.equal(detail.campaigns[0].NOME, "Nova unidade - PROSPE");
 });
 test("empty composition is allowed and no implicit campaigns are inserted", async () => {
 	const f = fixture();
@@ -239,21 +275,36 @@ test("schema/triggers fail closed and input cannot introduce SQL or a caller ten
 test("concurrent additions of the same unit/type yield one winner and no duplicate composition", async () => {
 	const f = fixture();
 	const results = await Promise.allSettled([
-		run(f, "campaign-create", { fields: { ...campaign, UNIDADE: 1 } }),
 		run(f, "campaign-create", {
-			fields: { ...campaign, CODIGO: 12, UNIDADE: 1 },
+			fields: { ...campaign, NOME: "Matriz - PROSPE", UNIDADE: 1 },
+		}),
+		run(f, "campaign-create", {
+			fields: {
+				...campaign,
+				NOME: "Matriz - PROSPE",
+				CODIGO: 12,
+				UNIDADE: 1,
+			},
 		}),
 	]);
 	assert.equal(results.filter((r) => r.status === "fulfilled").length, 1);
 	assert.equal(f.state.campaigns.length, 1);
 });
-test("name edit uses full CAS, preserves type/unit and blocks ambiguous activation", async () => {
+test("name compatibility, full CAS and composition gates preserve legacy semantics", async () => {
 	const f = fixture();
 	await run(f, "create", { fields, campaigns: [campaign] });
 	const { CODIGO, ...expected } = f.state.campaigns[0];
+	await assert.rejects(
+		run(f, "campaign-patch", {
+			id: CODIGO,
+			changes: { NOME: "Nome comercial livre" },
+			expected,
+		}),
+		{ code: "TENANT_ORDERING_LEGACY_NAME_DEPENDENCY" },
+	);
 	await run(f, "campaign-patch", {
 		id: CODIGO,
-		changes: { NOME: "Nome comercial livre" },
+		changes: { MAX_RESPOSTA: 60 },
 		expected,
 	});
 	assert.equal(f.state.campaigns[0].TIPO, "PROSPE");
@@ -288,6 +339,7 @@ test("legacy quartet can resume after explicit pause and unit rename does not re
 			...campaign,
 			CODIGO: 20 + i,
 			TIPO,
+			NOME: `Nova unidade - ${TIPO}`,
 		})),
 	});
 	const { CODIGO, ...expected } = f.state.campaigns[0];
@@ -297,19 +349,72 @@ test("legacy quartet can resume after explicit pause and unit rename does not re
 		expected,
 	});
 	const before = structuredClone(f.state.campaigns);
-	await run(f, "patch", {
-		id: 2,
-		changes: { DESCRICAO: "Renomeada" },
-		expected: fields,
-	});
-	assert.deepEqual(f.state.campaigns, before);
 	await assert.rejects(
 		run(f, "patch", {
 			id: 2,
-			changes: { DESCRICAO: "stale" },
+			changes: { DESCRICAO: "Renomeada" },
 			expected: fields,
 		}),
-		{ code: "TENANT_ORDERING_CHANGED" },
+		{ code: "TENANT_ORDERING_LEGACY_NAME_DEPENDENCY" },
 	);
+	assert.deepEqual(f.state.campaigns, before);
 	assert.equal(f.state.units[1].INATIVOS_RECENTES, 30);
+});
+
+test("automatic IDs serialize concurrent short unit creation and never require a browser counter", async () => {
+	const f = fixture();
+	const create = (DESCRICAO) =>
+		run(f, "create", {
+			fields: { DESCRICAO, INATIVOS_RECENTES: 30, INATIVOS_ANTIGOS: 90 },
+		});
+	const results = await Promise.all([
+		create("Unidade A"),
+		create("Unidade B"),
+	]);
+	assert.deepEqual(
+		results.map((r) => r.CODIGO),
+		[2, 3],
+	);
+	assert.equal(f.state.campaigns.length, 0);
+});
+
+test("supplemental audience campaigns exceed four, resume without quartet, and keep authoritative policy independent of legacy type", async () => {
+	const f = fixture();
+	for (let i = 0; i < 6; i++)
+		await run(f, "campaign-create", {
+			operationMode: "audience-manual",
+			organizationalUnitId: 1,
+			fields: { NOME: `Público ${i}`, MAX_RESPOSTA: 0 },
+		});
+	assert.equal(f.state.campaigns.length, 6);
+	assert.equal(f.state.policies.length, 6);
+	assert.equal(new Set(f.state.campaigns.map((c) => c.CODIGO)).size, 6);
+	assert(
+		f.state.campaigns.every(
+			(c) => c.UNIDADE === null && c.TIPO === null && c.PAUSADA === "SIM",
+		),
+	);
+	const detail = await run(f, "detail", { id: 1 });
+	assert.equal(detail.data.manualCampaignCount, 6);
+	assert.equal(detail.data.mode, "audience-manual");
+	assert.deepEqual(detail.data.pendingReasons, []);
+	const context = await run(f, "campaign-context", { id: 1 });
+	assert.equal(context.operationMode, "audience-manual");
+	assert.equal(context.unit.CODIGO, 1);
+	assert.equal(context.capabilities.resume.allowed, true);
+	const { CODIGO, ...expected } = context.campaign;
+	await run(f, "campaign-patch", {
+		id: CODIGO,
+		changes: { NOME: "Nome livre", PAUSADA: "NAO" },
+		expected,
+	});
+	assert.equal(f.state.campaigns[0].PAUSADA, "NAO");
+	assert.equal(f.state.policies[0].change_effect, "future_batches");
+	await assert.rejects(
+		run(f, "campaign-create", {
+			operationMode: "audience-manual",
+			organizationalUnitId: 1,
+			fields: { NOME: "Inválida", UNIDADE: 1, TIPO: "PROSPE" },
+		}),
+	);
 });

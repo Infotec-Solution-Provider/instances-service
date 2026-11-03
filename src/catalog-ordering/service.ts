@@ -245,10 +245,30 @@ export class CatalogOrderingService {
 		private readonly database: Pick<TenantDatabase, "transaction">,
 	) {}
 	async execute(tenant: string, input: unknown): Promise<unknown> {
-		if (input && typeof input === "object" && "action" in input && input.action === "units")
+		if (
+			input &&
+			typeof input === "object" &&
+			"action" in input &&
+			input.action === "units"
+		)
 			return new CrmUnitsService(this.database).execute(tenant, input);
-		if (input && typeof input === "object" && !Array.isArray(input) && (input as Record<string, unknown>)["action"] === "phone-area-associate") return associateDddCities(this.database, tenant, input);
-		if (input && typeof input === "object" && !Array.isArray(input) && ["phone-area-create", "phone-area-patch"].includes(String((input as Record<string, unknown>)["action"]))) return writePhoneArea(this.database, tenant, input);
+		if (
+			input &&
+			typeof input === "object" &&
+			!Array.isArray(input) &&
+			(input as Record<string, unknown>)["action"] ===
+				"phone-area-associate"
+		)
+			return associateDddCities(this.database, tenant, input);
+		if (
+			input &&
+			typeof input === "object" &&
+			!Array.isArray(input) &&
+			["phone-area-create", "phone-area-patch"].includes(
+				String((input as Record<string, unknown>)["action"]),
+			)
+		)
+			return writePhoneArea(this.database, tenant, input);
 		const body = object(input, [
 			"action",
 			"kind",
@@ -304,6 +324,8 @@ export class CatalogOrderingService {
 				if (body["action"] === "read") return before.value;
 				if (body["action"] === "create") {
 					const fields = object(body["fields"], spec.fields) as Row;
+					if (kind === "campaigns" && fields["CODIGO"] === undefined)
+						fields["CODIGO"] = next(before.data, "CODIGO");
 					if (kind === "campaigns" && Number(fields["UNIDADE"]) > 0)
 						return fail("TENANT_ORDERING_COMPOSITION_PENDING");
 					if (
