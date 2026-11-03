@@ -3,6 +3,7 @@ import type { TenantDatabase } from "../tenant-database/tenant-database";
 import type { TenantTransaction } from "../tenant-database/transaction";
 import { TenantDatabaseError } from "../tenant-database/error";
 import { compileOrder, parseOrder, orderExpressions } from "./ordering";
+import { CrmUnitsService } from "../crm-units/service";
 
 type Row = Record<string, string | number | null>;
 type Kind = "campaigns" | "segments" | "states" | "cities";
@@ -242,6 +243,8 @@ export class CatalogOrderingService {
 		private readonly database: Pick<TenantDatabase, "transaction">,
 	) {}
 	async execute(tenant: string, input: unknown): Promise<unknown> {
+		if (input && typeof input === "object" && "action" in input && input.action === "units")
+			return new CrmUnitsService(this.database).execute(tenant, input);
 		const body = object(input, [
 			"action",
 			"kind",
@@ -297,6 +300,8 @@ export class CatalogOrderingService {
 				if (body["action"] === "read") return before.value;
 				if (body["action"] === "create") {
 					const fields = object(body["fields"], spec.fields) as Row;
+					if (kind === "campaigns" && Number(fields["UNIDADE"]) > 0)
+						return fail("TENANT_ORDERING_COMPOSITION_PENDING");
 					if (
 						!Object.keys(fields).length ||
 						Object.values(fields).some(
