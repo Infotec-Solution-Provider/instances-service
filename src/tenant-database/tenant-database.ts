@@ -142,6 +142,7 @@ export class TenantDatabase {
 				callback,
 				operation.startsWith("crm.catalog-ordering.") ||
 					operation === "crm.proposal.change" ||
+					operation === "crm.satisfaction.question.write" ||
 					operation === "telephony.schedule.finish",
 			);
 			outcome = "COMMITTED";
