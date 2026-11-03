@@ -3,6 +3,7 @@ import { Router } from "express";
 import { getTenantDatabase } from "../services/tenant-database.service";
 import { TenantDatabaseError } from "../tenant-database/error";
 import type { TenantDatabase } from "../tenant-database/tenant-database";
+import { parseTransfer, transferCustomers, transferTables } from "../tenant-database/administration-transfer";
 
 const allowedTables = new Set([
 	"campanhas_clientes",
@@ -181,6 +182,11 @@ export function createTenantTransactionsRouter(
 			return reject(429, "TENANT_TRANSACTION_BUSY");
 		nonces.set(nonce, Number(timestamp) + windowMs);
 		try {
+			if (req.body?.operation === "crm.administration.transfer") {
+				const command = parseTransfer(req.body);
+				const result = await database().transaction(req.params["instance"]!, command.operation, transferTables, tx => transferCustomers(tx, command));
+				return res.json({ data: result });
+			}
 			const batch = parseBatch(req.body);
 			const result = await database().transaction(
 				req.params["instance"]!,

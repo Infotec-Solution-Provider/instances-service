@@ -140,7 +140,8 @@ export class TenantDatabase {
 				tables,
 				this.config,
 				callback,
-				operation.startsWith("crm.catalog-ordering."),
+				operation.startsWith("crm.catalog-ordering.") || operation === "crm.administration.transfer",
+				operation === "crm.administration.transfer",
 			);
 			outcome = "COMMITTED";
 			code = "OK";

@@ -119,6 +119,17 @@ test("signed command binds tenant, payload and operation; executes sequentially 
 	assert.match(f.queries[2].sql, /^INSERT/);
 });
 
+test("administration accepts only the structured signed command and owns its table list", async (t) => {
+  const f=await fixture(t,{error:new TenantDatabaseError("TENANT_TRANSACTION_REQUIRES_INNODB")});
+  const command={operation:"crm.administration.transfer",operationId:"a0000000-0000-4000-8000-000000000001",actorId:99,source:10,destination:20,customerIds:[1],version:"a".repeat(64)};
+  for(const patch of [{statements:batch().statements},{tables:["clientes"]},{sql:"DELETE FROM clientes"},{destination:0}])assert.equal((await f.send({...command,...patch})).status,400);
+  assert.equal((await f.send(command,{headers:{"content-type":"application/json"}})).status,401);
+  const result=await f.send(command);
+  assert.equal(result.body.code,"TENANT_TRANSACTION_REQUIRES_INNODB");
+  assert.equal(f.transactions.length,1);assert.equal(f.transactions[0].instance,"alpha");assert.equal(f.transactions[0].operation,"crm.administration.transfer");
+  assert.deepEqual(f.transactions[0].tables,["clientes","operadores","campanhas_clientes","fidelizacoes","transferencia_clientes","transferencia_clientes_itens","crm_administration_transfers"]);
+});
+
 test("customer write locks policy then customer, keeps history in one signed batch and rejects undeclared history/other resources", async t => {
   const f = await fixture(t);
   const body = { operation: "crm.customer.write", customerId: 4, tables: ["clientes", "parametros", "motivo_desativacao_cliente"], statements: [{ sql: "UPDATE clientes SET ATIVO=? WHERE CODIGO=?", params: ["NAO", 4], expectAffectedRows: 1 }, { sql: "INSERT INTO motivo_desativacao_cliente (CLIENTE) SELECT ?", params: [4], expectAffectedRows: 1 }] };
