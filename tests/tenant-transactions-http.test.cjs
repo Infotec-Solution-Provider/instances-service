@@ -42,7 +42,11 @@ async function fixture(t, options = {}) {
 			return callback({
 				async execute(sql, params) {
 					queries.push({ sql, params });
-					if (sql.includes("information_schema.TRIGGERS"))
+					if (sql === "SELECT PESQSAT_CODIGO,PESQ_DESCRICAO FROM pesquisa_satisfacao ORDER BY PESQSAT_CODIGO LIMIT 101 FOR UPDATE") return options.questions ?? [{PESQSAT_CODIGO:1,PESQ_DESCRICAO:"Atendimento?"}];
+          if (sql === "SELECT PESQSAT_CODIGO FROM pesquisa_satisfacao_avaliacao WHERE CAMPCLI_CODIGO=? LIMIT 1 FOR UPDATE") return options.existingSurvey ? [{PESQSAT_CODIGO:1}] : [];
+          if (sql === "SELECT CAMPCLI_CODIGO FROM pesquisa_satisfacao_avaliacao WHERE PESQSAT_CODIGO=? LIMIT 1 FOR UPDATE") return options.used ? [{CAMPCLI_CODIGO:41}] : [];
+          if (sql.startsWith("INSERT INTO pesquisa_satisfacao_avaliacao")) { if(options.failAnswers) throw new TenantDatabaseError("TENANT_TRANSACTION_QUERY_FAILED"); return {affectedRows:options.answerCount ?? 1}; }
+          if (sql.includes("information_schema.TRIGGERS"))
 						return options.triggers ?? [];
 					if (/^SELECT CODIGO FROM parametros/.test(sql)) return options.missingPolicy ? [] : [{ CODIGO: 1 }];
 					if (/^SELECT CODIGO FROM clientes WHERE CODIGO=\? FOR UPDATE/.test(sql)) return [{ CODIGO: params[0] }];
@@ -52,7 +56,7 @@ async function fixture(t, options = {}) {
 						return options.missingSchedule ? [] : [{ CODIGO: params[0] }];
 					if (/^INSERT INTO campanhas_clientes\b/.test(sql) && options.generationCount !== undefined)
 						return { affectedRows: options.generationCount };
-					return { affectedRows: options.affectedRows ?? 1 };
+					return { affectedRows: options.affectedRows ?? 1, ...(/^INSERT INTO historico_cli/.test(sql) && !options.missingHistoryId ? {insertId:71} : {}) };
 				},
 			});
 		},
@@ -286,4 +290,162 @@ test("commit uncertainty and untyped failures are sanitized without request data
 		assert.doesNotMatch(JSON.stringify(result), /password|private|SQL/);
 		assert.equal(f.transactions.length, 1);
 	}
+});
+
+function questionBatch() {
+	return {
+		operation: "crm.satisfaction.question.write",
+		questionId: 1,
+		tables: ["pesquisa_satisfacao", "pesquisa_satisfacao_avaliacao"],
+		statements: [
+			{
+				sql: "UPDATE pesquisa_satisfacao SET PESQ_DESCRICAO=? WHERE PESQSAT_CODIGO=?",
+				params: ["Nova", 1],
+				expectAffectedRows: 1,
+			},
+		],
+	};
+}
+function surveyBatch() {
+	const body = finishBatch();
+	body.surveyQuestions = [{ id: 1, description: "Atendimento?" }];
+	body.tables.push(
+		"pesquisa_satisfacao",
+		"pesquisa_satisfacao_avaliacao",
+		"telephony_satisfaction_submissions",
+	);
+	body.statements.push(
+		{
+			sql: "INSERT INTO telephony_satisfaction_submissions (operation_id,schedule_id,actor_id,history_id,survey_json,created_at) VALUES (?,?,?,?,?,UTC_TIMESTAMP())",
+			params: ["fixture-op", 41, 7, null, "{}"],
+			expectAffectedRows: 1,
+		},
+		{
+			sql: "INSERT INTO pesquisa_satisfacao_avaliacao (CAMPCLI_CODIGO,PESQSAT_CODIGO,PESQSAT_AVALIACAO) VALUES (?,?,?)",
+			params: [41, 1, "5"],
+			expectAffectedRows: 1,
+		},
+	);
+	return body;
+}
+test("question mutation locks the complete catalog and evaluation key before writing, rejects used questions", async (t) => {
+	const f = await fixture(t);
+	assert.equal((await f.send(questionBatch())).status, 200);
+	assert.match(
+		f.queries[1].sql,
+		/ORDER BY PESQSAT_CODIGO LIMIT 101 FOR UPDATE/,
+	);
+	assert.match(f.queries[2].sql, /PESQSAT_CODIGO=\? LIMIT 1 FOR UPDATE/);
+	assert.match(f.queries[3].sql, /^UPDATE pesquisa_satisfacao/);
+	const used = await fixture(t, { used: true });
+	assert.equal((await used.send(questionBatch())).status, 409);
+	assert.equal(
+		used.queries.some((q) => q.sql.startsWith("UPDATE")),
+		false,
+	);
+	const invalid = await fixture(t);
+	for (const mutate of [
+		(b) => b.tables.push("clientes"),
+		(b) => (b.questionId = -1),
+		(b) => (b.statements[0].sql = "UPDATE operadores SET ATIVO='NAO'"),
+		(b) => (b.actorId = 1),
+	]) {
+		const b = questionBatch();
+		mutate(b);
+		assert.equal((await invalid.send(b)).status, 400);
+	}
+	assert.equal(invalid.transactions.length, 0);
+});
+test("survey finalization shares the transaction, validates snapshot under lock, and checks triggers on every mutated table", async (t) => {
+	const f = await fixture(t);
+	const response = await f.send(surveyBatch());
+	assert.equal(response.status, 200);
+	assert.equal(response.body.data.length, 5);
+	assert.equal(f.transactions.length, 1);
+	assert.deepEqual(f.queries[0].params, [
+		"campanhas_clientes",
+		"historico_cli",
+		"telephony_schedule_finishes",
+		"telephony_satisfaction_submissions",
+		"pesquisa_satisfacao_avaliacao",
+	]);
+	assert.equal(
+		f.queries.find((q) =>
+			q.sql.startsWith("INSERT INTO telephony_satisfaction_submissions"),
+		).params[3],
+		71,
+	);
+	assert.match(
+		f.queries[2].sql,
+		/pesquisa_satisfacao ORDER BY PESQSAT_CODIGO LIMIT 101 FOR UPDATE/,
+	);
+	const changed = await fixture(t, {
+		questions: [{ PESQSAT_CODIGO: 1, PESQ_DESCRICAO: "Mudou" }],
+	});
+	assert.equal((await changed.send(surveyBatch())).status, 409);
+	assert.equal(
+		changed.queries.some((q) => q.sql.startsWith("UPDATE")),
+		false,
+	);
+	const added = await fixture(t, {
+		questions: [
+			{ PESQSAT_CODIGO: 1, PESQ_DESCRICAO: "Atendimento?" },
+			{ PESQSAT_CODIGO: 2, PESQ_DESCRICAO: "Nova" },
+		],
+	});
+	assert.equal((await added.send(surveyBatch())).status, 409);
+	const existing = await fixture(t, { existingSurvey: true });
+	assert.equal((await existing.send(surveyBatch())).status, 409);
+	assert.equal(
+		existing.queries.some((q) => q.sql.startsWith("UPDATE")),
+		false,
+	);
+	const triggers = await fixture(t, {
+		triggers: [{ TRIGGER_NAME: "unknown" }],
+	});
+	assert.equal((await triggers.send(surveyBatch())).status, 503);
+	assert.equal(triggers.queries.length, 1);
+});
+test("survey transport rejects partial, duplicate, foreign-question or foreign-schedule payloads before transaction", async (t) => {
+	const f = await fixture(t);
+	for (const mutate of [
+		(b) => b.statements.pop(),
+		(b) => b.tables.pop(),
+		(b) => b.surveyQuestions.push(b.surveyQuestions[0]),
+		(b) => (b.statements[4].params[0] = 42),
+		(b) => (b.statements[4].params[1] = 2),
+		(b) => (b.statements[4].params[2] = "6"),
+		(b) => (b.statements[4].expectAffectedRows = 0),
+		(b) => (b.surveyQuestions[0].tenant = "beta"),
+		(b) =>
+			(b.statements[3].sql =
+				"INSERT INTO operadores (CODIGO) VALUES (?)"),
+	]) {
+		const b = surveyBatch();
+		mutate(b);
+		assert.equal((await f.send(b)).status, 400);
+	}
+	assert.equal(f.transactions.length, 0);
+});
+test("failed mandatory answer insert aborts with known outcome and no raw SQL", async (t) => {
+	const f = await fixture(t, { failAnswers: true });
+	const response = await f.send(surveyBatch());
+	assert.deepEqual(response, {
+		status: 503,
+		body: {
+			code: "TENANT_TRANSACTION_QUERY_FAILED",
+			outcome: "NOT_COMMITTED",
+		},
+	});
+	assert.equal(f.transactions.length, 1);
+	const missing = await fixture(t, { missingHistoryId: true });
+	assert.equal((await missing.send(surveyBatch())).status, 409);
+	assert.equal(
+		missing.queries.some((q) =>
+			q.sql.startsWith("INSERT INTO telephony_satisfaction_submissions"),
+		),
+		false,
+	);
+	const mismatch = await fixture(t, { answerCount: 0 });
+	assert.equal((await mismatch.send(surveyBatch())).status, 409);
 });

@@ -17,8 +17,28 @@ const requiredTables = [
 	"clientes",
 	"operadores",
 ];
-const generationTables = ["campanhas", "campanhas_clientes", "clientes", "operadores", "excecoes", "excecoes_cidade", "excecoes_estado", "excecoes_segmentos"];
-const finishTables = ["campanhas_clientes", "historico_cli", "telephony_schedule_finishes", "resultados", "operadores"];
+const generationTables = [
+	"campanhas",
+	"campanhas_clientes",
+	"clientes",
+	"operadores",
+	"excecoes",
+	"excecoes_cidade",
+	"excecoes_estado",
+	"excecoes_segmentos",
+];
+const finishTables = [
+	"campanhas_clientes",
+	"historico_cli",
+	"telephony_schedule_finishes",
+	"resultados",
+	"operadores",
+];
+const surveyTables = [
+	"pesquisa_satisfacao",
+	"pesquisa_satisfacao_avaliacao",
+	"telephony_satisfaction_submissions",
+];
 const windowMs = 60_000;
 interface Statement {
 	sql: string;
@@ -30,6 +50,8 @@ interface Batch {
 	campaignId?: number;
 	scheduleId?: number;
 	customerId?: number;
+	questionId?: number;
+	surveyQuestions?: { id: number; description: string }[];
 	tables: string[];
 	statements: Statement[];
 }
@@ -48,6 +70,63 @@ function customerBatch(batch: Record<string, unknown>): Batch {
   return { operation: "crm.customer.write", customerId: Number(batch["customerId"]), tables: [...new Set(batch["tables"] as string[])], statements };
 }
 
+function questionBatch(batch: Record<string, unknown>): Batch {
+	const invalid = (): never => {
+		throw new TenantDatabaseError("TENANT_TRANSACTION_INVALID_REQUEST");
+	};
+	if (
+		Object.keys(batch).some(
+			(k) =>
+				!["operation", "questionId", "tables", "statements"].includes(
+					k,
+				),
+		) ||
+		!Number.isInteger(batch["questionId"]) ||
+		Number(batch["questionId"]) < 0 ||
+		Number(batch["questionId"]) > 2147483647 ||
+		!Array.isArray(batch["tables"]) ||
+		batch["tables"].length !== 2 ||
+		!["pesquisa_satisfacao", "pesquisa_satisfacao_avaliacao"].every(
+			(table) => (batch["tables"] as unknown[]).includes(table),
+		) ||
+		!Array.isArray(batch["statements"]) ||
+		batch["statements"].length !== 1
+	)
+		return invalid();
+	const statement = batch["statements"][0];
+	if (
+		!statement ||
+		typeof statement !== "object" ||
+		Object.keys(statement).some(
+			(k) => !["sql", "params", "expectAffectedRows"].includes(k),
+		) ||
+		typeof statement.sql !== "string" ||
+		statement.sql.length > 4096 ||
+		/;|--|\/\*|#/.test(statement.sql) ||
+		!(
+			Number(batch["questionId"]) === 0
+				? /^INSERT INTO pesquisa_satisfacao \(PESQ_DESCRICAO\)/
+				: /^(?:UPDATE pesquisa_satisfacao SET |DELETE FROM pesquisa_satisfacao WHERE )/
+		).test(statement.sql) ||
+		statement.expectAffectedRows !== 1 ||
+		!Array.isArray(statement.params) ||
+		statement.params.length > 4 ||
+		statement.params.some(
+			(p: unknown) =>
+				p !== null &&
+				typeof p !== "string" &&
+				!(typeof p === "number" && Number.isInteger(p)),
+		)
+	)
+		return invalid();
+	return {
+		operation: "crm.satisfaction.question.write",
+		questionId: Number(batch["questionId"]),
+		tables: ["pesquisa_satisfacao", "pesquisa_satisfacao_avaliacao"],
+		statements: [statement],
+	};
+}
+
 function parseBatch(value: unknown): Batch {
 	const invalid = (): never => {
 		throw new TenantDatabaseError("TENANT_TRANSACTION_INVALID_REQUEST");
@@ -55,18 +134,73 @@ function parseBatch(value: unknown): Batch {
 	if (!value || typeof value !== "object" || Array.isArray(value))
 		return invalid();
 	const batch = value as Record<string, unknown>;
-	if (batch["operation"] === "crm.customer.write") return customerBatch(batch);
+	if (batch["operation"] === "crm.customer.write")
+		return customerBatch(batch);
+	if (batch["operation"] === "crm.satisfaction.question.write")
+		return questionBatch(batch);
 	const generation = batch["operation"] === "crm.campaign.generate";
 	const finish = batch["operation"] === "telephony.schedule.finish";
-	const permitted = generation ? new Set(generationTables) : finish ? new Set(finishTables) : allowedTables;
-	const required = generation ? generationTables : finish ? finishTables : requiredTables;
+	const survey = finish && batch["surveyQuestions"] !== undefined;
+	if (
+		survey &&
+		(!Array.isArray(batch["surveyQuestions"]) ||
+			!batch["surveyQuestions"].length ||
+			batch["surveyQuestions"].length > 100 ||
+			batch["surveyQuestions"].some((q: unknown, i: number) => {
+				if (!q || typeof q !== "object" || Array.isArray(q))
+					return true;
+				const value = q as Record<string, unknown>;
+				return (
+					Object.keys(value).some(
+						(k) => !["id", "description"].includes(k),
+					) ||
+					!Number.isInteger(value["id"]) ||
+					Number(value["id"]) < 1 ||
+					Number(value["id"]) > 2147483647 ||
+					typeof value["description"] !== "string" ||
+					value["description"].length > 1000 ||
+					(i > 0 &&
+						Number(
+							(batch["surveyQuestions"] as { id: number }[])[
+								i - 1
+							]!.id,
+						) >= Number(value["id"]))
+				);
+			}))
+	)
+		return invalid();
+	const permitted = generation
+		? new Set(generationTables)
+		: finish
+			? new Set([...finishTables, ...(survey ? surveyTables : [])])
+			: allowedTables;
+	const required = generation
+		? generationTables
+		: finish
+			? [...finishTables, ...(survey ? surveyTables : [])]
+			: requiredTables;
 	if (
 		Object.keys(batch).some(
-			(key) => !["operation", "tables", "statements", ...(generation ? ["campaignId"] : []), ...(finish ? ["scheduleId"] : [])].includes(key),
+			(key) =>
+				![
+					"operation",
+					"tables",
+					"statements",
+					...(generation ? ["campaignId"] : []),
+					...(finish ? ["scheduleId", "surveyQuestions"] : []),
+				].includes(key),
 		) ||
-		(generation && (!Number.isInteger(batch["campaignId"]) || Number(batch["campaignId"]) < 1 || Number(batch["campaignId"]) > 2147483647)) ||
-		(finish && (!Number.isInteger(batch["scheduleId"]) || Number(batch["scheduleId"]) < 1 || Number(batch["scheduleId"]) > 2147483647)) ||
-		(!generation && !finish && batch["operation"] !== "telephony.schedule.edit") ||
+		(generation &&
+			(!Number.isInteger(batch["campaignId"]) ||
+				Number(batch["campaignId"]) < 1 ||
+				Number(batch["campaignId"]) > 2147483647)) ||
+		(finish &&
+			(!Number.isInteger(batch["scheduleId"]) ||
+				Number(batch["scheduleId"]) < 1 ||
+				Number(batch["scheduleId"]) > 2147483647)) ||
+		(!generation &&
+			!finish &&
+			batch["operation"] !== "telephony.schedule.edit") ||
 		!Array.isArray(batch["tables"]) ||
 		batch["tables"].length > permitted.size ||
 		batch["tables"].some(
@@ -76,7 +210,7 @@ function parseBatch(value: unknown): Batch {
 			(table) => !(batch["tables"] as unknown[]).includes(table),
 		) ||
 		!Array.isArray(batch["statements"]) ||
-		batch["statements"].length !== (finish ? 3 : 2)
+		batch["statements"].length !== (finish ? (survey ? 5 : 3) : 2)
 	)
 		return invalid();
 	const statements = batch["statements"].map(
@@ -96,15 +230,31 @@ function parseBatch(value: unknown): Batch {
 				/;|--|\/\*|#/.test(sql) ||
 				!(
 					generation
-						? index === 0 ? /^\s*UPDATE\s+`?campanhas`?\s/i : /^\s*INSERT\s+INTO\s+`?campanhas_clientes`?\s*\(/i
-						: finish ? index === 0 ? /^\s*UPDATE\s+`?campanhas_clientes`?\s/i : index === 1 ? /^\s*INSERT\s+INTO\s+`?historico_cli`?\s*\(/i : /^\s*INSERT\s+INTO\s+`?telephony_schedule_finishes`?\s*\(/i
-						: index === 0 ? /^\s*UPDATE\s+`?campanhas_clientes`?\s/i : /^\s*INSERT\s+INTO\s+`?telephony_schedule_edits`?\s*\(/i
+						? index === 0
+							? /^\s*UPDATE\s+`?campanhas`?\s/i
+							: /^\s*INSERT\s+INTO\s+`?campanhas_clientes`?\s*\(/i
+						: finish
+							? index === 0
+								? /^\s*UPDATE\s+`?campanhas_clientes`?\s/i
+								: index === 1
+									? /^\s*INSERT\s+INTO\s+`?historico_cli`?\s*\(/i
+									: index === 2
+										? /^\s*INSERT\s+INTO\s+`?telephony_schedule_finishes`?\s*\(/i
+										: index === 3
+											? /^INSERT INTO telephony_satisfaction_submissions \(/
+											: /^INSERT INTO pesquisa_satisfacao_avaliacao \(/
+							: index === 0
+								? /^\s*UPDATE\s+`?campanhas_clientes`?\s/i
+								: /^\s*INSERT\s+INTO\s+`?telephony_schedule_edits`?\s*\(/i
 				).test(sql) ||
-				(generation && index === 1
-					? !Number.isInteger(statement["expectAffectedRows"]) || Number(statement["expectAffectedRows"]) < 0 || Number(statement["expectAffectedRows"]) > 2000
+				((generation && index === 1) || (survey && index === 4)
+					? !Number.isInteger(statement["expectAffectedRows"]) ||
+						Number(statement["expectAffectedRows"]) < 0 ||
+						Number(statement["expectAffectedRows"]) > 2000
 					: statement["expectAffectedRows"] !== 1) ||
 				!Array.isArray(params) ||
-				params.length > (generation ? 500 : 200) ||
+				params.length >
+					(generation ? 500 : survey && index === 4 ? 300 : 200) ||
 				params.some(
 					(param) =>
 						param !== null &&
@@ -121,13 +271,60 @@ function parseBatch(value: unknown): Batch {
 				)
 			)
 				return invalid();
-			return { sql, params, expectAffectedRows: Number(statement["expectAffectedRows"]) };
+			if (
+				survey &&
+				index === 3 &&
+				(sql !==
+					"INSERT INTO telephony_satisfaction_submissions (operation_id,schedule_id,actor_id,history_id,survey_json,created_at) VALUES (?,?,?,?,?,UTC_TIMESTAMP())" ||
+					params.length !== 5 ||
+					params[1] !== batch["scheduleId"] ||
+					params[3] !== null ||
+					typeof params[0] !== "string" ||
+					!Number.isInteger(params[2]) ||
+					Number(params[2]) < 1 ||
+					typeof params[4] !== "string")
+			)
+				return invalid();
+			if (
+				survey &&
+				index === 4 &&
+				(statement["expectAffectedRows"] !==
+					(batch["surveyQuestions"] as unknown[]).length ||
+					params.length !==
+						(batch["surveyQuestions"] as unknown[]).length * 3 ||
+					(batch["surveyQuestions"] as { id: number }[]).some(
+						(q, i) =>
+							params[i * 3] !== batch["scheduleId"] ||
+							params[i * 3 + 1] !== q.id ||
+							!["", "1", "2", "3", "4", "5"].includes(
+								String(params[i * 3 + 2]),
+							),
+					))
+			)
+				return invalid();
+			return {
+				sql,
+				params,
+				expectAffectedRows: Number(statement["expectAffectedRows"]),
+			};
 		},
 	);
 	return {
-		operation: generation ? "crm.campaign.generate" : finish ? "telephony.schedule.finish" : "telephony.schedule.edit",
+		operation: generation
+			? "crm.campaign.generate"
+			: finish
+				? "telephony.schedule.finish"
+				: "telephony.schedule.edit",
 		...(generation ? { campaignId: Number(batch["campaignId"]) } : {}),
 		...(finish ? { scheduleId: Number(batch["scheduleId"]) } : {}),
+		...(survey
+			? {
+					surveyQuestions: batch["surveyQuestions"] as {
+						id: number;
+						description: string;
+					}[],
+				}
+			: {}),
 		tables: [...new Set(batch["tables"] as string[])],
 		statements,
 	};
@@ -166,7 +363,14 @@ export function createTenantTransactionsRouter(
 		)
 			return reject(401, "TENANT_TRANSACTION_UNAUTHORIZED");
 		const body = JSON.stringify(req.body);
-		if (!body || Buffer.byteLength(body) > (req.body?.operation === "crm.customer.write" ? 1_048_576 : 131_072))
+		if (
+			!body ||
+			Buffer.byteLength(body) >
+				(req.body?.operation === "crm.customer.write" ||
+				req.body?.surveyQuestions
+					? 1_048_576
+					: 131_072)
+		)
 			return reject(413, "TENANT_TRANSACTION_TOO_LARGE");
 		const expected = createHmac("sha256", key)
 			.update(`${timestamp}\n${nonce}\n${req.path}\n${body}`)
@@ -188,7 +392,37 @@ export function createTenantTransactionsRouter(
 				batch.tables,
 				async (tx) => {
 					// Unknown triggers can write outside the declared tables/engines. Validate under metadata locks.
-					const mutated = batch.operation === "crm.customer.write" ? ["clientes", ...(batch.tables.includes("motivo_desativacao_cliente") ? ["motivo_desativacao_cliente"] : [])] : batch.operation === "crm.campaign.generate" ? ["campanhas", "campanhas_clientes"] : batch.operation === "telephony.schedule.finish" ? ["campanhas_clientes", "historico_cli", "telephony_schedule_finishes"] : ["campanhas_clientes", "telephony_schedule_edits"];
+					const mutated =
+						batch.operation === "crm.satisfaction.question.write"
+							? ["pesquisa_satisfacao"]
+							: batch.operation === "crm.customer.write"
+								? [
+										"clientes",
+										...(batch.tables.includes(
+											"motivo_desativacao_cliente",
+										)
+											? ["motivo_desativacao_cliente"]
+											: []),
+									]
+								: batch.operation === "crm.campaign.generate"
+									? ["campanhas", "campanhas_clientes"]
+									: batch.operation ===
+										  "telephony.schedule.finish"
+										? [
+												"campanhas_clientes",
+												"historico_cli",
+												"telephony_schedule_finishes",
+												...(batch.surveyQuestions
+													? [
+															"telephony_satisfaction_submissions",
+															"pesquisa_satisfacao_avaliacao",
+														]
+													: []),
+											]
+										: [
+												"campanhas_clientes",
+												"telephony_schedule_edits",
+											];
 					const triggers = await tx.execute<unknown[]>(
 						`SELECT TRIGGER_NAME FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = DATABASE() AND EVENT_OBJECT_TABLE IN (${mutated.map(() => "?").join(", ")}) LIMIT 1`,
 						mutated,
@@ -205,27 +439,115 @@ export function createTenantTransactionsRouter(
 							[batch.campaignId!],
 						);
 						if (locked.length !== 1)
-							throw new TenantDatabaseError("TENANT_TRANSACTION_AFFECTED_ROWS");
+							throw new TenantDatabaseError(
+								"TENANT_TRANSACTION_AFFECTED_ROWS",
+							);
 					}
 					if (batch.operation === "telephony.schedule.finish") {
-						const locked = await tx.execute<unknown[]>("SELECT CODIGO FROM campanhas_clientes WHERE CODIGO=? FOR UPDATE", [batch.scheduleId!]);
-						if (locked.length !== 1) throw new TenantDatabaseError("TENANT_TRANSACTION_AFFECTED_ROWS");
+						const locked = await tx.execute<unknown[]>(
+							"SELECT CODIGO FROM campanhas_clientes WHERE CODIGO=? FOR UPDATE",
+							[batch.scheduleId!],
+						);
+						if (locked.length !== 1)
+							throw new TenantDatabaseError(
+								"TENANT_TRANSACTION_AFFECTED_ROWS",
+							);
+					}
+					if (
+						batch.operation === "crm.satisfaction.question.write" ||
+						batch.surveyQuestions
+					) {
+						// Lock the full catalog range, including gaps: empty catalogs and new questions serialize too.
+						const questions = await tx.execute<
+							{ PESQSAT_CODIGO: number; PESQ_DESCRICAO: string }[]
+						>(
+							"SELECT PESQSAT_CODIGO,PESQ_DESCRICAO FROM pesquisa_satisfacao ORDER BY PESQSAT_CODIGO LIMIT 101 FOR UPDATE",
+						);
+						if (
+							questions.length > 100 ||
+							(batch.surveyQuestions &&
+								JSON.stringify(
+									questions.map((q) => ({
+										id: Number(q.PESQSAT_CODIGO),
+										description: q.PESQ_DESCRICAO,
+									})),
+								) !== JSON.stringify(batch.surveyQuestions))
+						)
+							throw new TenantDatabaseError(
+								"TENANT_TRANSACTION_AFFECTED_ROWS",
+							);
+						if (
+							batch.operation ===
+								"crm.satisfaction.question.write" &&
+							batch.questionId === 0 &&
+							questions.length >= 100
+						)
+							throw new TenantDatabaseError(
+								"TENANT_TRANSACTION_AFFECTED_ROWS",
+							);
+						if (batch.surveyQuestions) {
+							const existing = await tx.execute<unknown[]>(
+								"SELECT PESQSAT_CODIGO FROM pesquisa_satisfacao_avaliacao WHERE CAMPCLI_CODIGO=? LIMIT 1 FOR UPDATE",
+								[batch.scheduleId!],
+							);
+							if (existing.length)
+								throw new TenantDatabaseError(
+									"TENANT_TRANSACTION_AFFECTED_ROWS",
+								);
+						}
+						if (
+							batch.operation ===
+								"crm.satisfaction.question.write" &&
+							batch.questionId
+						) {
+							const used = await tx.execute<unknown[]>(
+								"SELECT CAMPCLI_CODIGO FROM pesquisa_satisfacao_avaliacao WHERE PESQSAT_CODIGO=? LIMIT 1 FOR UPDATE",
+								[batch.questionId],
+							);
+							if (used.length)
+								throw new TenantDatabaseError(
+									"TENANT_TRANSACTION_AFFECTED_ROWS",
+								);
+						}
 					}
 					const results: unknown[] = [];
 					if (batch.operation === "crm.customer.write") {
 						// All web customer writers serialize before policy/duplicate predicates.
-						const policy = await tx.execute<unknown[]>("SELECT CODIGO FROM parametros ORDER BY CODIGO LIMIT 2 FOR UPDATE");
-						if (policy.length !== 1) throw new TenantDatabaseError("TENANT_CUSTOMER_POLICY_UNAVAILABLE");
+						const policy = await tx.execute<unknown[]>(
+							"SELECT CODIGO FROM parametros ORDER BY CODIGO LIMIT 2 FOR UPDATE",
+						);
+						if (policy.length !== 1)
+							throw new TenantDatabaseError(
+								"TENANT_CUSTOMER_POLICY_UNAVAILABLE",
+							);
 						if (batch.customerId) {
-							const rows = await tx.execute<unknown[]>("SELECT CODIGO FROM clientes WHERE CODIGO=? FOR UPDATE", [batch.customerId]);
-							if (rows.length !== 1) throw new TenantDatabaseError("TENANT_TRANSACTION_AFFECTED_ROWS");
+							const rows = await tx.execute<unknown[]>(
+								"SELECT CODIGO FROM clientes WHERE CODIGO=? FOR UPDATE",
+								[batch.customerId],
+							);
+							if (rows.length !== 1)
+								throw new TenantDatabaseError(
+									"TENANT_TRANSACTION_AFFECTED_ROWS",
+								);
 						}
 					}
-					for (const statement of batch.statements) {
+					let historyId: number | undefined;
+					for (const [
+						statementIndex,
+						statement,
+					] of batch.statements.entries()) {
+						const parameters = [...statement.params];
+						if (batch.surveyQuestions && statementIndex === 3) {
+							if (!historyId)
+								throw new TenantDatabaseError(
+									"TENANT_TRANSACTION_AFFECTED_ROWS",
+								);
+							parameters[3] = historyId;
+						}
 						const result = await tx.execute<{
 							affectedRows?: number;
 							insertId?: number;
-						}>(statement.sql, statement.params);
+						}>(statement.sql, parameters);
 						if (
 							result?.affectedRows !==
 							statement.expectAffectedRows
@@ -233,8 +555,26 @@ export function createTenantTransactionsRouter(
 							throw new TenantDatabaseError(
 								"TENANT_TRANSACTION_AFFECTED_ROWS",
 							);
+						if (batch.surveyQuestions && statementIndex === 1) {
+							if (
+								!Number.isSafeInteger(result.insertId) ||
+								Number(result.insertId) < 1 ||
+								Number(result.insertId) > 2147483647
+							)
+								throw new TenantDatabaseError(
+									"TENANT_TRANSACTION_AFFECTED_ROWS",
+								);
+							historyId = result.insertId;
+						}
 						// Transport only acknowledgements, never driver metadata or SQL.
-						results.push({ affectedRows: result.affectedRows, ...(batch.operation === "crm.customer.write" && Number.isSafeInteger(result.insertId) && Number(result.insertId) > 0 ? { insertId: result.insertId } : {}) });
+						results.push({
+							affectedRows: result.affectedRows,
+							...(batch.operation === "crm.customer.write" &&
+							Number.isSafeInteger(result.insertId) &&
+							Number(result.insertId) > 0
+								? { insertId: result.insertId }
+								: {}),
+						});
 					}
 					return results;
 				},
