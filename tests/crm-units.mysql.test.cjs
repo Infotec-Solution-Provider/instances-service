@@ -84,6 +84,15 @@ for (const port of require("./isolated-mysql-ports.cjs")(
 							"utf8",
 						),
 					);
+					await admin.query(
+						"CREATE TABLE operadores(CODIGO INT PRIMARY KEY,ATIVO ENUM('SIM','NAO')) ENGINE=InnoDB",
+					);
+					await admin.query(
+						"INSERT INTO operadores VALUES(1,'SIM'),(2,'SIM'),(3,'NAO')",
+					);
+					await admin.query(
+						"CREATE TABLE campanhasxoperadores(CODIGO INT PRIMARY KEY DEFAULT 0,CAMPANHA INT,OPERADOR INT) ENGINE=InnoDB",
+					);
 				}
 				await run("alpha", "create", { fields, campaigns: [campaign] });
 				const detail = await run("alpha", "detail", { id: 2 });
@@ -98,15 +107,6 @@ for (const port of require("./isolated-mysql-ports.cjs")(
 						expected,
 					}),
 					{ code: "TENANT_ORDERING_COMPOSITION_PENDING" },
-				);
-				await admin.query(
-					"CREATE TABLE operadores(CODIGO INT PRIMARY KEY,ATIVO ENUM('SIM','NAO')) ENGINE=InnoDB",
-				);
-				await admin.query(
-					"INSERT INTO operadores VALUES(1,'SIM'),(2,'SIM'),(3,'NAO')",
-				);
-				await admin.query(
-					"CREATE TABLE campanhasxoperadores(CODIGO INT PRIMARY KEY DEFAULT 0,CAMPANHA INT,OPERADOR INT) ENGINE=InnoDB",
 				);
 				await assert.rejects(
 					run("alpha", "campaign-patch", {
