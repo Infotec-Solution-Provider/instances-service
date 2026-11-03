@@ -3,6 +3,8 @@ import { Router } from "express";
 import { getTenantDatabase } from "../services/tenant-database.service";
 import { TenantDatabaseError } from "../tenant-database/error";
 import type { TenantDatabase } from "../tenant-database/tenant-database";
+import { proposalBatch, finishProposalStatements } from "../crm-proposals/commands";
+import { proposalTables, eventSql, deleteSql } from "../crm-proposals/sql";
 
 const allowedTables = new Set([
 	"campanhas_clientes",
@@ -56,9 +58,10 @@ function parseBatch(value: unknown): Batch {
 		return invalid();
 	const batch = value as Record<string, unknown>;
 	if (batch["operation"] === "crm.customer.write") return customerBatch(batch);
+	if (batch["operation"] === "crm.proposal.change") return proposalBatch(batch);
 	const generation = batch["operation"] === "crm.campaign.generate";
 	const finish = batch["operation"] === "telephony.schedule.finish";
-	const permitted = generation ? new Set(generationTables) : finish ? new Set(finishTables) : allowedTables;
+	const permitted = generation ? new Set(generationTables) : finish ? new Set([...finishTables,...proposalTables]) : allowedTables;
 	const required = generation ? generationTables : finish ? finishTables : requiredTables;
 	if (
 		Object.keys(batch).some(
@@ -76,10 +79,12 @@ function parseBatch(value: unknown): Batch {
 			(table) => !(batch["tables"] as unknown[]).includes(table),
 		) ||
 		!Array.isArray(batch["statements"]) ||
-		batch["statements"].length !== (finish ? 3 : 2)
+		(finish ? batch["statements"].length < 3 || batch["statements"].length > 45 : batch["statements"].length !== 2)
 	)
 		return invalid();
-	const statements = batch["statements"].map(
+	const extensions = finish && batch["statements"].length > 3 ? finishProposalStatements(batch["statements"].slice(3),Number(batch["scheduleId"])) : [];
+	if (extensions.length && ["propostas","propostas_compras","crm_proposal_events"].some(t=>!(batch["tables"] as string[]).includes(t))) return invalid();
+	const statements = batch["statements"].slice(0,finish?3:2).map(
 		(input: unknown, index: number): Statement => {
 			if (!input || typeof input !== "object" || Array.isArray(input))
 				return invalid();
@@ -129,7 +134,7 @@ function parseBatch(value: unknown): Batch {
 		...(generation ? { campaignId: Number(batch["campaignId"]) } : {}),
 		...(finish ? { scheduleId: Number(batch["scheduleId"]) } : {}),
 		tables: [...new Set(batch["tables"] as string[])],
-		statements,
+		statements: [...statements,...extensions],
 	};
 }
 
@@ -189,6 +194,8 @@ export function createTenantTransactionsRouter(
 				async (tx) => {
 					// Unknown triggers can write outside the declared tables/engines. Validate under metadata locks.
 					const mutated = batch.operation === "crm.customer.write" ? ["clientes", ...(batch.tables.includes("motivo_desativacao_cliente") ? ["motivo_desativacao_cliente"] : [])] : batch.operation === "crm.campaign.generate" ? ["campanhas", "campanhas_clientes"] : batch.operation === "telephony.schedule.finish" ? ["campanhas_clientes", "historico_cli", "telephony_schedule_finishes"] : ["campanhas_clientes", "telephony_schedule_edits"];
+					if(batch.operation === "crm.proposal.change") mutated.splice(0,mutated.length,"propostas","crm_proposal_events");
+					else if(batch.tables.includes("propostas")) mutated.push("propostas","crm_proposal_events");
 					const triggers = await tx.execute<unknown[]>(
 						`SELECT TRIGGER_NAME FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = DATABASE() AND EVENT_OBJECT_TABLE IN (${mutated.map(() => "?").join(", ")}) LIMIT 1`,
 						mutated,
@@ -210,6 +217,68 @@ export function createTenantTransactionsRouter(
 					if (batch.operation === "telephony.schedule.finish") {
 						const locked = await tx.execute<unknown[]>("SELECT CODIGO FROM campanhas_clientes WHERE CODIGO=? FOR UPDATE", [batch.scheduleId!]);
 						if (locked.length !== 1) throw new TenantDatabaseError("TENANT_TRANSACTION_AFFECTED_ROWS");
+					}
+					// Lock proposals and purchase links in a stable order before CAS. InnoDB
+					// next-key locks prevent a concurrent purchase link from bypassing the guard.
+					if (batch.tables.includes("propostas")) {
+						if (batch.statements.some((s) => s.sql === deleteSql)) {
+							const refs = await tx.execute<
+								{
+									local_schema: number;
+									TABLE_NAME: string;
+									COLUMN_NAME: string;
+									REFERENCED_COLUMN_NAME: string;
+								}[]
+							>(
+								"SELECT TABLE_SCHEMA=DATABASE() AS local_schema,TABLE_NAME,COLUMN_NAME,REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE REFERENCED_TABLE_SCHEMA=DATABASE() AND REFERENCED_TABLE_NAME='propostas'",
+								[],
+							);
+							if (
+								refs.some(
+									(r) =>
+										Number(r.local_schema) !== 1 ||
+										r.TABLE_NAME !== "propostas_compras" ||
+										r.COLUMN_NAME !== "PROPOSTA" ||
+										r.REFERENCED_COLUMN_NAME !== "CODIGO",
+								)
+							)
+								throw new TenantDatabaseError(
+									"TENANT_PROPOSAL_UNREVIEWED_REFERENCES",
+								);
+						}
+						if (batch.operation === "crm.proposal.change") {
+							const operationId = batch.statements[1]!.params[0];
+							const used = await tx.execute<unknown[]>(
+								"SELECT operation_id FROM crm_proposal_events WHERE operation_id=? FOR UPDATE",
+								[operationId],
+							);
+							if (used.length)
+								throw new TenantDatabaseError(
+									"TENANT_TRANSACTION_AFFECTED_ROWS",
+								);
+						}
+						const ids = batch.statements
+							.filter((s) => s.sql === eventSql)
+							.map((s) => Number(s.params[2]))
+							.sort((a, b) => a - b);
+						for (const id of ids) {
+							if (
+								!Number.isInteger(id) ||
+								id < 1 ||
+								id > 2147483647
+							)
+								throw new TenantDatabaseError(
+									"TENANT_TRANSACTION_INVALID_REQUEST",
+								);
+							await tx.execute(
+								"SELECT CODIGO FROM propostas WHERE CODIGO=? FOR UPDATE",
+								[id],
+							);
+							await tx.execute(
+								"SELECT PROPOSTA FROM propostas_compras WHERE PROPOSTA=? FOR UPDATE",
+								[id],
+							);
+						}
 					}
 					const results: unknown[] = [];
 					if (batch.operation === "crm.customer.write") {

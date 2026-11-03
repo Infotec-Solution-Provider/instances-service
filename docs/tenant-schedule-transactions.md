@@ -11,3 +11,8 @@ Erros retornam somente `code` e `outcome` (`NOT_COMMITTED` ou `UNKNOWN`), sem SQ
 Antes de disponibilizar: validar schema/triggers no tenant de destino, aplicar a migration revisada do customers-service e configurar as chaves por ambiente. Nenhum DDL ou alteração de produção ocorre no startup. Publicar instances-service compatível antes do customers-service e frontend. A validação local não comprova funcionamento do CRM real; tenants com triggers não revisadas permanecem bloqueados.
 
 Testes: `npm test` inclui contrato HTTP/assinatura/CAS/outcome e a fundação transacional. A suíte MySQL da fundação e a de edição no customers-service são opt-in, com bancos sintéticos locais.
+## Propostas (frente G16–G18, branch isolada)
+
+O comando `crm.proposal.change` aceita somente os templates exatos de `src/crm-proposals/sql.ts`, com dois statements (mutação e evento). A finalização pode anexar pares exatos de criação/cancelamento e auditoria após agenda/histórico/recibo. Templates são espelhados no customers-service. A operação mantém HMAC, tenant do catálogo, validação de engines e triggers e não abre execução SQL ao navegador.
+
+Propostas usam REPEATABLE READ, locks por operação/proposta/vínculos de compra e CAS com revisão de auditoria para evitar aceitação de um snapshot após alteração e reversão do valor. FKs desconhecidas para propostas bloqueiam exclusão. A atomicidade continua dependente de tabelas InnoDB e triggers revisados. Não houve validação MySQL real ou publicação nesta frente.
