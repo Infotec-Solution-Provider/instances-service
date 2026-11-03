@@ -20,6 +20,7 @@ export async function runTenantTransaction<T>(
 	config: TenantDatabaseConfig,
 	callback: (transaction: TenantTransaction) => Promise<T>,
 	repeatableRead = false,
+	captureCrmCivilTime = false,
 ): Promise<T> {
 	let open = true,
 		busy = false,
@@ -165,6 +166,12 @@ export async function runTenantTransaction<T>(
 			}, config.transactionMs);
 		});
 		const work = async () => {
+			if (captureCrmCivilTime) {
+				// Legacy transfer expiry uses NOW() in the tenant's default zone. Capture
+				// that civil time before switching this pooled session to UTC for auditing.
+				await control("SET SESSION time_zone = @@GLOBAL.time_zone");
+				await control("SET @inpulse_crm_transfer_at = NOW()");
+			}
 			await control("SET SESSION time_zone = '+00:00'");
 			await control(
 				"SET SESSION sql_mode = CONCAT_WS(',', @@SESSION.sql_mode, 'STRICT_ALL_TABLES')",
