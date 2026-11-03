@@ -22,7 +22,9 @@ const campaign = {
 	MAX_RESPOSTA: 300,
 	PAUSADA: "SIM",
 };
-function fixture() {
+function fixture(
+	defaults = { INATIVOS_RECENTES: "180", INATIVOS_ANTIGOS: "365" },
+) {
 	let state = { units: [structuredClone(unit)], campaigns: [], policies: [] },
 		failInsert = false,
 		missing = false,
@@ -36,7 +38,12 @@ function fixture() {
 			type,
 			nullable: "YES",
 			maxLength: 150,
-			defaultValue: type === "datetime" ? "0000-00-00 00:00:00" : null,
+			defaultValue:
+				tableName === "unidades" && Object.hasOwn(defaults, name)
+					? defaults[name]
+					: type === "datetime"
+						? "0000-00-00 00:00:00"
+						: null,
 		}));
 	const columns = [
 		...metadata("unidades", {
@@ -376,6 +383,43 @@ test("automatic IDs serialize concurrent short unit creation and never require a
 		[2, 3],
 	);
 	assert.equal(f.state.campaigns.length, 0);
+});
+
+test("name-only unit creation uses verified tenant defaults, preserves explicit periods and fails closed without valid defaults", async () => {
+	const f = fixture({ INATIVOS_RECENTES: "120", INATIVOS_ANTIGOS: "240" });
+	await run(f, "create", { fields: { DESCRICAO: "Somente nome" } });
+	assert.deepEqual(f.state.units[1], {
+		CODIGO: 2,
+		DESCRICAO: "Somente nome",
+		INATIVOS_RECENTES: 120,
+		INATIVOS_ANTIGOS: 240,
+	});
+	await run(f, "create", {
+		fields: {
+			DESCRICAO: "Períodos próprios",
+			INATIVOS_RECENTES: 15,
+			INATIVOS_ANTIGOS: 45,
+		},
+	});
+	assert.equal(f.state.units[2].INATIVOS_RECENTES, 15);
+	assert.equal(f.state.units[2].INATIVOS_ANTIGOS, 45);
+	assert.deepEqual(f.state.units[0], unit);
+	for (const defaults of [
+		{ INATIVOS_RECENTES: null, INATIVOS_ANTIGOS: "365" },
+		{ INATIVOS_RECENTES: "(180)", INATIVOS_ANTIGOS: "365" },
+		{ INATIVOS_RECENTES: "0", INATIVOS_ANTIGOS: "365" },
+		{ INATIVOS_RECENTES: "365", INATIVOS_ANTIGOS: "180" },
+	]) {
+		const invalid = fixture(defaults);
+		await assert.rejects(
+			run(invalid, "create", { fields: { DESCRICAO: "Não gravar" } }),
+		);
+		assert.equal(
+			invalid.calls.filter((call) => call.sql.startsWith("INSERT"))
+				.length,
+			0,
+		);
+	}
 });
 
 test("supplemental audience campaigns exceed four, resume without quartet, and keep authoritative policy independent of legacy type", async () => {

@@ -643,6 +643,29 @@ export class CrmUnitsService {
 							: number(fields["CODIGO"]);
 					fields["CODIGO"] = id;
 					const description = text(fields["DESCRICAO"], 50);
+					for (const key of [
+						"INATIVOS_RECENTES",
+						"INATIVOS_ANTIGOS",
+					]) {
+						if (Object.hasOwn(fields, key)) continue;
+						const storedDefault = unitColumns.find(
+							(column) => column.name === key,
+						)?.defaultValue;
+						if (
+							typeof storedDefault !== "number" &&
+							(typeof storedDefault !== "string" ||
+								!/^[1-9]\d*$/.test(storedDefault))
+						)
+							return fail("TENANT_ORDERING_SCHEMA_UNAVAILABLE");
+						const value = Number(storedDefault);
+						if (
+							!Number.isSafeInteger(value) ||
+							value < 1 ||
+							value > 2147483647
+						)
+							return fail("TENANT_ORDERING_SCHEMA_UNAVAILABLE");
+						fields[key] = value;
+					}
 					thresholds(fields);
 					validate("unidades", fields);
 					const duplicates = await tx.execute<Row[]>(

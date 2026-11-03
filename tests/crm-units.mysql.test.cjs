@@ -67,7 +67,7 @@ for (const port of require("./isolated-mysql-ports.cjs")(
 					);
 					await admin.query("INSERT INTO parametros VALUES(1)");
 					await admin.query(
-						"CREATE TABLE unidades(CODIGO INT PRIMARY KEY,DESCRICAO VARCHAR(50),INATIVOS_RECENTES INT,INATIVOS_ANTIGOS INT) ENGINE=InnoDB",
+						"CREATE TABLE unidades(CODIGO INT PRIMARY KEY,DESCRICAO VARCHAR(50),INATIVOS_RECENTES INT DEFAULT 180,INATIVOS_ANTIGOS INT DEFAULT 365) ENGINE=InnoDB",
 					);
 					await admin.query(
 						"INSERT INTO unidades VALUES(1,'Legada',90,180)",
@@ -196,15 +196,16 @@ for (const port of require("./isolated-mysql-ports.cjs")(
 				const shortUnits = await Promise.all(
 					["Manual A", "Manual B"].map((DESCRICAO) =>
 						run("alpha", "create", {
-							fields: {
-								DESCRICAO,
-								INATIVOS_RECENTES: 30,
-								INATIVOS_ANTIGOS: 90,
-							},
+							fields: { DESCRICAO },
 						}),
 					),
 				);
 				assert.equal(new Set(shortUnits.map((u) => u.CODIGO)).size, 2);
+				const createdUnit = await run("alpha", "detail", {
+					id: shortUnits[0].CODIGO,
+				});
+				assert.equal(createdUnit.data.INATIVOS_RECENTES, 180);
+				assert.equal(createdUnit.data.INATIVOS_ANTIGOS, 365);
 				const extra = await Promise.all(
 					Array.from({ length: 6 }, (_, i) =>
 						run("alpha", "campaign-create", {
