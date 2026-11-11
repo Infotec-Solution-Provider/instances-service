@@ -14,6 +14,8 @@ import { startZeroTierRecovery } from "./services/zerotier-recovery.service";
 import { createTenantTransactionsRouter } from "./controllers/tenant-transactions.controller";
 
 import { createCatalogOrderingRouter } from "./controllers/catalog-ordering.controller";
+import { createAdminRouter } from "./admin/router";
+import { adminParserError } from "./admin/parser-error";
 
 const app = express();
 const appPort = Number(process.env["LISTEN_PORT"]) || 8000;
@@ -27,9 +29,12 @@ const controllers = {
 	geo: new GeoController(),
 };
 
+app.use("/api/internal/admin", express.json({ limit: "1mb" }));
 app.use(express.json({ limit: "20mb" }));
 app.use(express.urlencoded({ limit: "20mb", extended: true }));
 app.use(cors());
+app.use(createAdminRouter());
+app.use(adminParserError);
 app.use(createTenantTransactionsRouter());
 app.use(createCatalogOrderingRouter());
 app.use(controllers.auth.router);

@@ -5,6 +5,7 @@ import { TenantDatabaseError } from "./error";
 import { deadline } from "./deadline";
 
 interface Entry {
+	invalidated?: boolean;
 	tenant: string;
 	server: string;
 	fingerprint: string;
@@ -55,7 +56,7 @@ export class TenantPoolRegistry {
 			if (this.closed)
 				throw new TenantDatabaseError("TENANT_DATABASE_CLOSED");
 			let entry = this.entries.get(destination.tenant);
-			if (entry && entry.fingerprint !== fingerprint) {
+			if (entry && (entry.invalidated || entry.fingerprint !== fingerprint)) {
 				if (entry.users)
 					throw new TenantDatabaseError("TENANT_DESTINATION_CHANGED");
 				await this.retire(entry);
@@ -111,10 +112,18 @@ export class TenantPoolRegistry {
 						released = true;
 						entry.users--;
 						entry.lastUsed = Date.now();
+						if (entry.invalidated && entry.users === 0) void this.retire(entry).catch(() => {});
 					}
 				},
 			};
 		}
+	}
+	/** New transactions cannot lease this destination; existing transactions retain their connections until release. */
+	public async invalidate(tenant: string): Promise<void> {
+		const entry = this.entries.get(tenant);
+		if (!entry) return;
+		entry.invalidated = true;
+		if (entry.users === 0) await this.retire(entry);
 	}
 	public async sweep(now = Date.now()): Promise<void> {
 		await Promise.all(

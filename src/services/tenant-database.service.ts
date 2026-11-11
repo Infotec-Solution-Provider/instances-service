@@ -34,3 +34,4 @@ export function getTenantDatabase(): TenantDatabase {
 export async function closeTenantDatabase(): Promise<void> {
 	await database?.close();
 }
+export async function invalidateTenantDatabase(tenant: string): Promise<void> { await database?.invalidate(tenant); }

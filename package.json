@@ -36,6 +36,8 @@
 	},
 	"scripts": {
 		"test": "npm run build && node --test tests/*.test.cjs",
+		"test:admin": "npm run build && node --test tests/admin-adapter.test.cjs",
+		"test:admin:mysql": "npm run build && node --test tests/admin.mysql.test.cjs",
 		"test:tenant-database": "npm run build && node --test tests/tenant-database.test.cjs",
 		"test:tenant-database:mysql": "npm run build && node --test tests/tenant-database.mysql.test.cjs",
 		"dev": "ts-node-dev --transpile-only --respawn --ignore-watch node_modules src/main.ts",

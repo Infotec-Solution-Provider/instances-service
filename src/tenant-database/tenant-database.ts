@@ -187,6 +187,7 @@ export class TenantDatabase {
 			...this.outcomes,
 		};
 	}
+	public invalidate(tenant: string): Promise<void> { return this.pools.invalidate(tenant); }
 	public async close(): Promise<void> {
 		this.closed = true;
 		this.admission.close();

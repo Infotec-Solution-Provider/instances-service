@@ -4,6 +4,11 @@ import ClientPool from "../entities/client-pool.entity";
 import ServersService from "./servers.service";
 
 class PoolsService {
+	/** Retire only this tenant after an explicit administration apply. In-flight queries drain. */
+	public static async invalidate(instanceName: string): Promise<void> {
+		await PoolsService.creatingPools.get(instanceName)?.catch(() => undefined);
+		for (const pool of [...PoolsService.pools]) if (pool.name === instanceName) PoolsService.removePool(pool);
+	}
 	private static readonly pools: Array<ClientPool> = [];
 	private static readonly poolHealthCheckInterval = 30000; // 30 segundos
 	private static readonly creatingPools = new Map<
