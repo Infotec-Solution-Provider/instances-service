@@ -3,6 +3,20 @@ import PoolsService from "../services/pools.service";
 import { TenantDatabaseError } from "../tenant-database/error";
 import { AdminCommand, AdminMutationResult, AdminProtocolError, AdminSetting, requireRevision } from "./admin-protocol";
 import { diff, Query, readReceipt, secretKey, snapshot, tenant, validateChanges, writeReceipt } from "./settings-utils";
+import { crmParameterSettings } from "./crm-parameter-settings.metadata";
+
+const crmMetadata = new Map(crmParameterSettings.map(setting => [setting.key, setting]));
+/** Presentation only. The tenant schema still determines types, values and validation. */
+export function applyCrmDisplayMetadata(setting: AdminSetting): AdminSetting {
+  const known = crmMetadata.get(setting.key);
+  if (!known) return setting;
+  return { ...setting, label: known.label, description: known.description, category: known.group,
+    ...(setting.options ? { options: setting.options.map(option => ({ ...option,
+      label: known.type === "boolean" && option.value === known.trueValue ? "Ativado" :
+        known.type === "boolean" && option.value === known.falseValue ? "Desativado" : option.label,
+    })) } : {}),
+  };
+}
 
 const sipGlobalFields = new Set(["ASTERISK_SERVER", "ASTERISK_PORTA", "ASTERISK_PROXY", "SIP_EMITE_BIP", "SIP_VOLUME_AUTOMATICO", "CALL_IN_DEVICE", "CALL_OUT_DEVICE", "RING_DEVICE", "IP_TELNET", "PORTA_TELNET", "USUARIO_TELNET", "SENHA_TELNET", "PAUSARRAMAL", "RAMALPAUSA", "RAMALDESPAUSA", "LIGACAO_IMEDIATA", "SIP_ID", "SIP_KEY", "GRAVAR_LIGACAO"]);
 const sipUserFields = new Set(["RAMAL_SIP", "IP_SERVIDOR_SIP", "LOGIN_SIP", "SENHA_SIP", "USRID_SIP", "CODECS_SIP", "CFG_CONFIG_SIP"]);
@@ -37,7 +51,8 @@ async function current(command: AdminCommand, query: Query, lock = false) {
     const options = column.type === "enum" ? [...column.columnType.matchAll(/'((?:[^'\\]|\\.)*)'/g)].map(match => ({ label: match[1]!, value: match[1]!.replace(/\\'/g, "'") })) : undefined;
     const numeric = /^(tinyint|smallint|mediumint|int|bigint|decimal|float|double)$/.test(column.type);
     const secret = secretKey(column.key) || column.key === "ice_servers_json" || column.key === "CFG_CONFIG_SIP";
-    return { key: column.key, label: column.key, description: source === "crm" ? "Parâmetro do CRM legado. O valor é validado contra o schema deste tenant." : "Configuração técnica de telefonia.", category: source === "crm" ? "CRM legado" : "Telefonia", type: secret ? "secret" : options ? "enum" : numeric ? "number" : "string", ...(options ? { options } : {}), defaultValue: column.defaultValue, canReset: column.defaultValue !== null || column.nullable === "YES", applyMode: source === "sip-global" ? "reload" : "dynamic" };
+    const setting: AdminSetting = { key: column.key, label: column.key, description: source === "crm" ? "Parâmetro do CRM legado. O valor é validado contra o schema deste tenant." : "Configuração técnica de telefonia.", category: source === "crm" ? "CRM legado" : "Telefonia", type: secret ? "secret" : options ? "enum" : numeric ? "number" : "string", ...(options ? { options } : {}), defaultValue: column.defaultValue, canReset: column.defaultValue !== null || column.nullable === "YES", applyMode: source === "sip-global" ? "reload" : "dynamic" };
+    return source === "crm" ? applyCrmDisplayMetadata(setting) : setting;
   });
   return { columns: selected, state: values, catalog, primary, table: name, exists: !!rows[0] };
 }
