@@ -170,7 +170,7 @@ export async function runTenantTransaction<T>(
 				// Legacy transfer expiry uses NOW() in the tenant's default zone. Capture
 				// that civil time before switching this pooled session to UTC for auditing.
 				await control("SET SESSION time_zone = @@GLOBAL.time_zone");
-				await control("SET @inpulse_crm_transfer_at = NOW()");
+				await control("SET @inpulse_crm_transfer_at = NOW(), @inpulse_crm_utc_at = UTC_TIMESTAMP()");
 			}
 			await control("SET SESSION time_zone = '+00:00'");
 			await control(

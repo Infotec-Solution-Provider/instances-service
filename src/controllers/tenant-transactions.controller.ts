@@ -2,6 +2,10 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { Router } from "express";
 import { getTenantDatabase } from "../services/tenant-database.service";
 import { TenantDatabaseError } from "../tenant-database/error";
+import { parseRuntimeCommand } from "../telephony-runtime/contract";
+import { runRuntime, afterTelephonyFinish } from "../telephony-runtime/runtime";
+import { parseFinishV2, FinishV2Error } from "../telephony-finish-v2/contract";
+import { finishTelephonyV2, finishV2Tables } from "../telephony-finish-v2/finish";
 import type { TenantDatabase } from "../tenant-database/tenant-database";
 import { synchronizeCustomerPhones } from "../services/customer-phone-sync";
 import { validateSatisfactionEffects } from "../services/satisfaction-effect";
@@ -551,6 +555,25 @@ export function createTenantTransactionsRouter(
 			return reject(429, "TENANT_TRANSACTION_BUSY");
 		nonces.set(nonce, Number(timestamp) + windowMs);
 		try {
+			if (req.body?.operation === "telephony.runtime") {
+				const result = await runRuntime(database(), req.params["instance"]!, parseRuntimeCommand(req.body));
+				return res.json({ data: result });
+			}
+			if (req.body?.operation === "telephony.schedule.finish.v2") {
+				try {
+					const command = parseFinishV2(req.body);
+					const result = await database().transaction(req.params["instance"]!, command.operation, finishV2Tables,
+						async (tx) => {
+							try { return await finishTelephonyV2(tx, command, { afterFinish: afterTelephonyFinish }); }
+							catch(error) { if(error instanceof FinishV2Error) throw new TenantDatabaseError(`TENANT_${error.code}`); throw error; }
+						});
+					return res.json({ data: result });
+				} catch (error) {
+					if (error instanceof FinishV2Error) return res.status(error.status).json({ code: `TENANT_${error.code}`, message: error.message, outcome: "NOT_COMMITTED" });
+					if(error instanceof TenantDatabaseError && error.code.startsWith("TENANT_TELEPHONY_FINISH")) return res.status(error.code.endsWith("INVALID")?400:error.code.endsWith("FORBIDDEN")?403:409).json({code:error.code,message:"Releia o atendimento e a configuração da empresa antes de finalizar.",outcome:error.outcome});
+					throw error;
+				}
+			}
 			if (req.body?.operation === "crm.administration.transfer") {
 				const command = parseTransfer(req.body);
 				const result = await database().transaction(
@@ -567,6 +590,14 @@ export function createTenantTransactionsRouter(
 				batch.operation,
 				batch.tables,
 				async (tx) => {
+					if(batch.operation === "telephony.schedule.finish") {
+						const policyTable=await tx.execute<{ENGINE:string}[]>("SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='telephony_finish_policy'");
+						if(policyTable.length) {
+							if(policyTable[0]?.ENGINE!=="InnoDB")throw new TenantDatabaseError("TENANT_TRANSACTION_REQUIRES_INNODB");
+							const policy=await tx.execute<{enabled:number}[]>("SELECT enabled FROM telephony_finish_policy WHERE id=1 FOR UPDATE");
+							if(Number(policy[0]?.enabled)===1)throw new TenantDatabaseError("TENANT_TELEPHONY_FINISH_V2_REQUIRED");
+						}
+					}
 					// Unknown triggers can write outside the declared tables/engines. Validate under metadata locks.
 					const mutated =
 						batch.operation === "crm.satisfaction.question.write"
@@ -881,6 +912,7 @@ export function createTenantTransactionsRouter(
 									"TENANT_TRANSACTION_AFFECTED_ROWS",
 									"TENANT_IMPORT_DUPLICATE",
 									"TENANT_IMPORT_OPERATION_REUSED",
+									"TENANT_TELEPHONY_FINISH_V2_REQUIRED",
 							  ].includes(safe.code)
 							? 409
 							: 503,

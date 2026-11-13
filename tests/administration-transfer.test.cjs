@@ -349,10 +349,10 @@ test("atomic transfer preserves completed schedules, counters, other operators a
 	);
 	assert.ok(
 		f.controls.indexOf("SET SESSION time_zone = @@GLOBAL.time_zone") <
-			f.controls.indexOf("SET @inpulse_crm_transfer_at = NOW()"),
+			f.controls.indexOf("SET @inpulse_crm_transfer_at = NOW(), @inpulse_crm_utc_at = UTC_TIMESTAMP()"),
 	);
 	assert.ok(
-		f.controls.indexOf("SET @inpulse_crm_transfer_at = NOW()") <
+		f.controls.indexOf("SET @inpulse_crm_transfer_at = NOW(), @inpulse_crm_utc_at = UTC_TIMESTAMP()") <
 			f.controls.indexOf("SET SESSION time_zone = '+00:00'"),
 	);
 	assert.ok(

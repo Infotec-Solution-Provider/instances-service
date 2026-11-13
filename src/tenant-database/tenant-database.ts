@@ -145,8 +145,10 @@ export class TenantDatabase {
 					operation === "crm.satisfaction.question.write" ||
 					operation === "crm.administration.transfer" ||
 					operation === "crm.customer.write" ||
-					operation === "telephony.schedule.finish",
-				operation === "crm.administration.transfer",
+					operation === "telephony.schedule.finish" ||
+					operation === "telephony.schedule.finish.v2" ||
+					operation === "telephony.runtime",
+				operation === "crm.administration.transfer" || operation === "telephony.schedule.finish.v2" || operation === "telephony.runtime",
 			);
 			outcome = "COMMITTED";
 			code = "OK";

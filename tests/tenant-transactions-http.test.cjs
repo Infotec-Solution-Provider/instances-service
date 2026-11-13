@@ -42,6 +42,11 @@ async function fixture(t, options = {}) {
 			return callback({
 				async execute(sql, params) {
 					queries.push({ sql, params });
+					if(sql === "SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='telephony_finish_policy'") return options.finishPolicy ? [{ENGINE:"InnoDB"}] : [];
+					if(sql === "SELECT enabled FROM telephony_finish_policy WHERE id=1 FOR UPDATE") return [{enabled:options.finishPolicy?1:0}];
+					if(sql === "SELECT CODIGO,LOGIN,NOME,ATIVO,NIVEL FROM operadores WHERE CODIGO=? FOR UPDATE") return [{CODIGO:params[0],LOGIN:"operator",NOME:"Operator",ATIVO:"SIM",NIVEL:"ATIVO"}];
+					if(sql.startsWith("SELECT actor_id,schedule_id,request_hash,result_json FROM telephony_finish_operations"))return options.finishV2Receipt?[options.finishV2Receipt]:[];
+					if(sql === "SELECT * FROM telephony_finish_policy WHERE id=1 FOR UPDATE")return [{enabled:0,exclusive_writer:0,preflight_revision:null}];
 					if (
 						sql.includes("information_schema.COLUMNS") &&
 						sql.includes("TABLE_NAME='crm_import_receipts'")
@@ -567,21 +572,21 @@ test("finalization locks one schedule and atomically requires schedule, history 
 		},
 	});
 	assert.equal(f.transactions[0].operation, "telephony.schedule.finish");
-	assert.deepEqual(f.queries[0].params, [
+	assert.deepEqual(f.queries.find(q=>q.sql.includes("information_schema.TRIGGERS")).params, [
 		"campanhas_clientes",
 		"historico_cli",
 		"telephony_schedule_finishes",
 	]);
 	assert.equal(
-		f.queries[1].sql,
+		f.queries[2].sql,
 		"SELECT CODIGO FROM campanhas_clientes WHERE CODIGO=? FOR UPDATE",
 	);
-	assert.deepEqual(f.queries[1].params, [41]);
+	assert.deepEqual(f.queries[2].params, [41]);
 });
 test("finalization rejects missing locks, missing required tables, mutated operations and unsigned context", async (t) => {
 	const f = await fixture(t, { missingSchedule: true });
 	assert.equal((await f.send(finishBatch())).status, 409);
-	assert.equal(f.queries.length, 2);
+	assert.equal(f.queries.length, 3);
 	const g = await fixture(t);
 	for (const mutate of [
 		(b) => delete b.scheduleId,
@@ -603,6 +608,24 @@ test("finalization rejects missing locks, missing required tables, mutated opera
 		assert.equal((await g.send(body)).status, 400);
 	}
 	assert.equal(g.transactions.length, 0);
+});
+
+test("legacy finish is fenced inside its transaction when the reviewed v2 policy is enabled",async(t)=>{
+ const f=await fixture(t,{finishPolicy:true});
+ const result=await f.send(finishBatch());assert.equal(result.status,409);assert.equal(result.body.code,"TENANT_TELEPHONY_FINISH_V2_REQUIRED");
+ assert.ok(f.queries.some(q=>q.sql==="SELECT enabled FROM telephony_finish_policy WHERE id=1 FOR UPDATE"));assert.ok(!f.queries.some(q=>/^(UPDATE|INSERT)/.test(q.sql)));
+});
+test("typed v2 rejects SQL escape before transaction and preserves a business refusal as a known rollback",async(t)=>{
+ const f=await fixture(t);const body={operation:"telephony.schedule.finish.v2",actorId:7,scheduleId:41,command:{operationId:randomUUID(),resultId:9,observation:"Atendimento"}};
+ assert.equal((await f.send({...body,sql:"DELETE FROM clientes"})).status,400);assert.equal(f.transactions.length,0);
+ const result=await f.send(body);assert.equal(result.status,409);assert.equal(result.body.code,"TENANT_TELEPHONY_FINISH_POLICY_UNAVAILABLE");assert.equal(result.body.outcome,"NOT_COMMITTED");
+ assert.ok(!f.queries.some(q=>/^(UPDATE|INSERT)/.test(q.sql)));
+});
+test("typed v2 can return the exact original receipt after a lost response without writes",async(t)=>{
+ const {parseFinishV2}=require('../dist/telephony-finish-v2/contract');const {finishHash}=require('../dist/telephony-finish-v2/finish');
+ const body={operation:"telephony.schedule.finish.v2",actorId:7,scheduleId:41,command:{operationId:randomUUID(),resultId:9,observation:"Atendimento"}};
+ const receipt={scheduleId:41,historyId:71,successorScheduleId:42};const f=await fixture(t,{finishV2Receipt:{actor_id:7,schedule_id:41,request_hash:finishHash(parseFinishV2(body)),result_json:JSON.stringify(receipt)}});
+ assert.deepEqual(await f.send(body),{status:200,body:{data:receipt}});assert.ok(!f.queries.some(q=>/^(UPDATE|INSERT)/.test(q.sql)));
 });
 test("no signing secret fails closed without contacting tenant", async (t) => {
 	const f = await fixture(t, { secret: "" });
@@ -941,7 +964,7 @@ test("survey finalization shares the transaction, validates snapshot under lock,
 	assert.equal(response.status, 200);
 	assert.equal(response.body.data.length, 5);
 	assert.equal(f.transactions.length, 1);
-	assert.deepEqual(f.queries[0].params, [
+	assert.deepEqual(f.queries.find(q=>q.sql.includes("information_schema.TRIGGERS")).params, [
 		"campanhas_clientes",
 		"historico_cli",
 		"telephony_schedule_finishes",
@@ -955,7 +978,7 @@ test("survey finalization shares the transaction, validates snapshot under lock,
 		71,
 	);
 	assert.match(
-		f.queries[2].sql,
+		f.queries[3].sql,
 		/pesquisa_satisfacao ORDER BY PESQSAT_CODIGO LIMIT 101 FOR UPDATE/,
 	);
 	const changed = await fixture(t, {
@@ -983,7 +1006,7 @@ test("survey finalization shares the transaction, validates snapshot under lock,
 		triggers: [{ TRIGGER_NAME: "unknown" }],
 	});
 	assert.equal((await triggers.send(surveyBatch())).status, 503);
-	assert.equal(triggers.queries.length, 1);
+	assert.equal(triggers.queries.length, 2);
 });
 test("survey transport rejects partial, duplicate, foreign-question or foreign-schedule payloads before transaction", async (t) => {
 	const f = await fixture(t);
@@ -1221,8 +1244,8 @@ test("proposal and satisfaction effects share one finish transaction and stable 
 			.map((q) => q.sql),
 		body.statements.map((s) => s.sql),
 	);
-	assert.ok(f.queries[0].params.includes("crm_proposal_events"));
-	assert.ok(f.queries[0].params.includes("pesquisa_satisfacao_avaliacao"));
+	assert.ok(f.queries.find(q=>q.sql.includes("information_schema.TRIGGERS")).params.includes("crm_proposal_events"));
+	assert.ok(f.queries.find(q=>q.sql.includes("information_schema.TRIGGERS")).params.includes("pesquisa_satisfacao_avaliacao"));
 	const failing = await fixture(t, { failAnswers: true });
 	assert.equal((await failing.send(body)).status, 503);
 	assert.ok(!failing.queries.some((q) => q.sql === proposalSql.createSql));
