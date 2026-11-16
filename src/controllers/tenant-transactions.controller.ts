@@ -4,6 +4,7 @@ import { getTenantDatabase } from "../services/tenant-database.service";
 import { TenantDatabaseError } from "../tenant-database/error";
 import { parseRuntimeCommand } from "../telephony-runtime/contract";
 import { runRuntime, afterTelephonyFinish } from "../telephony-runtime/runtime";
+import { parsePauseEligibility, operatorPauseEligibility } from "../telephony-runtime/operator-pause";
 import { parseFinishV2, FinishV2Error } from "../telephony-finish-v2/contract";
 import { finishTelephonyV2, finishV2Tables } from "../telephony-finish-v2/finish";
 import type { TenantDatabase } from "../tenant-database/tenant-database";
@@ -555,6 +556,9 @@ export function createTenantTransactionsRouter(
 			return reject(429, "TENANT_TRANSACTION_BUSY");
 		nonces.set(nonce, Number(timestamp) + windowMs);
 		try {
+			if (req.body?.operation === "operator.pause.eligibility") {
+				return res.json({ data: await operatorPauseEligibility(database(), req.params["instance"]!, parsePauseEligibility(req.body)) });
+			}
 			if (req.body?.operation === "telephony.runtime") {
 				const result = await runRuntime(database(), req.params["instance"]!, parseRuntimeCommand(req.body));
 				return res.json({ data: result });

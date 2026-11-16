@@ -2,6 +2,7 @@ import { runtimeMetrics } from "./metrics";
 export { runtimeMetrics } from "./metrics";
 import { createHash } from "node:crypto";
 import { handleWebSession } from "./web-session";
+import { pauseCutoffAvailable, pauseCutoffColumn, pausePolicyScope, semanticPauseInput } from "./operator-pause";
 import type { TenantTransaction } from "../tenant-database/transaction";
 import type { TenantDatabase } from "../tenant-database/tenant-database";
 import {
@@ -63,6 +64,12 @@ async function clock(tx: TenantTransaction) {
 	return (await tx.execute<Row[]>("SELECT UTC_TIMESTAMP() AS now", []))[0]![
 		"now"
 	];
+}
+async function unavailableClock(tx: TenantTransaction) {
+	// Fractional syntax is unsupported by MySQL 5.5. The additive column's
+	// actual type proves support before using a separate millisecond clock.
+	const column = await pauseCutoffColumn(tx);
+	return (await tx.execute<Row[]>(column.fractional ? "SELECT UTC_TIMESTAMP(3) AS now" : "SELECT UTC_TIMESTAMP() AS now", []))[0]!["now"];
 }
 async function receipt(
 	tx: TenantTransaction,
@@ -143,12 +150,13 @@ async function stateView(tx: TenantTransaction, id: number) {
 	const segment = segments[0];
 	const policy = (
 		await tx.execute<Row[]>(
-			"SELECT allow_change_reason FROM telephony_runtime_policy WHERE id=1",
+			"SELECT * FROM telephony_runtime_policy WHERE id=1 LOCK IN SHARE MODE",
 			[],
 		)
 	)[0];
 	return {
 		enabled: true,
+		...pausePolicyScope(policy, Number(policy?.["pause_all_channels"]) === 1 && await pauseCutoffAvailable(tx)),
 		allowChangeReason: await canChangeReason(
 			tx,
 			policy?.["allow_change_reason"],
@@ -161,6 +169,7 @@ async function stateView(tx: TenantTransaction, id: number) {
 			state?.["reason_id"] == null ? null : Number(state["reason_id"]),
 		pauseId: state?.["pause_id"] == null ? null : Number(state["pause_id"]),
 		startedAt: iso(segment?.["started_at"]),
+		unavailableSince: iso(state?.["unavailable_since"]),
 		maxSeconds: Number(segment?.["max_seconds"] || 0),
 		reason: segment?.["reason_name"] || null,
 		reasons,
@@ -242,9 +251,12 @@ async function beginPause(
 			operationId,
 		],
 	);
+	const cutoff = Object.hasOwn(state, "unavailable_since")
+		? state["state"] === "available" ? await unavailableClock(tx) : state["unavailable_since"]
+		: null;
 	await tx.execute(
-		"UPDATE telephony_operator_state SET state='paused',reason_id=?,pause_id=?,pending_schedule_id=NULL,active_call_id=NULL,version=version+1,updated_at=UTC_TIMESTAMP() WHERE operator_id=?",
-		[reasonId, inserted["insertId"], state["operator_id"]],
+		`UPDATE telephony_operator_state SET state='paused',reason_id=?,pause_id=?,pending_schedule_id=NULL,active_call_id=NULL${Object.hasOwn(state, "unavailable_since") ? ",unavailable_since=?" : ""},version=version+1,updated_at=UTC_TIMESTAMP() WHERE operator_id=?`,
+		[reasonId, inserted["insertId"], ...(Object.hasOwn(state, "unavailable_since") ? [cutoff] : []), state["operator_id"]],
 	);
 	await enqueuePbx(tx, state["operator_id"], true, operationId);
 }
@@ -292,7 +304,7 @@ export async function executeRuntime(
 		{ action, input, actorId } = command;
 	const policy = (
 		await tx.execute<Row[]>(
-			"SELECT * FROM telephony_runtime_policy WHERE id=1",
+			"SELECT * FROM telephony_runtime_policy WHERE id=1 LOCK IN SHARE MODE",
 			[],
 		)
 	)[0];
@@ -560,8 +572,12 @@ export async function executeRuntime(
 		)
 			return fail("INVALID_REQUEST");
 		const state = await lockState(tx, actorId);
-		const saved = await receipt(tx, actorId, operationId, "pause", input);
+		const semantic = semanticPauseInput(input);
+		const saved = await receipt(tx, actorId, operationId, "pause", semantic);
 		if (saved) return saved;
+		if ((kind === "now" || kind === "after_attendance") && Number(policy["pause_all_channels"]) === 1 &&
+			(!Object.hasOwn(state, "unavailable_since") || input["scopeVerified"] !== "tenant-sql-v1" || input["scopePolicyRevision"] !== policy["preflight_hash"]))
+			return fail("GLOBAL_SCOPE_UNAVAILABLE");
 		if (Number(input["expectedVersion"]) !== Number(state["version"]))
 			return fail("VERSION_CONFLICT");
 		const now = await clock(tx),
@@ -585,14 +601,14 @@ export async function executeRuntime(
 				if (!calls[0]?.["schedule_id"])
 					return fail("SCHEDULE_UNAVAILABLE");
 				await tx.execute(
-					"UPDATE telephony_operator_state SET state='pending',reason_id=?,pending_schedule_id=?,version=version+1,updated_at=UTC_TIMESTAMP() WHERE operator_id=?",
-					[reasonId, calls[0]["schedule_id"], actorId],
+					`UPDATE telephony_operator_state SET state='pending',reason_id=?,pending_schedule_id=?${Object.hasOwn(state, "unavailable_since") ? ",unavailable_since=?" : ""},version=version+1,updated_at=UTC_TIMESTAMP() WHERE operator_id=?`,
+					[reasonId, calls[0]["schedule_id"], ...(Object.hasOwn(state, "unavailable_since") ? [await unavailableClock(tx)] : []), actorId],
 				);
 			}
 		} else if (kind === "cancel_pending") {
 			if (state["state"] !== "pending") return fail("INVALID_STATE");
 			await tx.execute(
-				"UPDATE telephony_operator_state SET state='available',reason_id=NULL,pending_schedule_id=NULL,version=version+1,updated_at=UTC_TIMESTAMP() WHERE operator_id=?",
+				`UPDATE telephony_operator_state SET state='available',reason_id=NULL,pending_schedule_id=NULL${Object.hasOwn(state, "unavailable_since") ? ",unavailable_since=NULL" : ""},version=version+1,updated_at=UTC_TIMESTAMP() WHERE operator_id=?`,
 				[actorId],
 			);
 		} else if (kind === "resume") {
@@ -607,7 +623,7 @@ export async function executeRuntime(
 					: observedAt;
 			await closePause(tx, state, at);
 			await tx.execute(
-				"UPDATE telephony_operator_state SET state='available',reason_id=NULL,pause_id=NULL,version=version+1,updated_at=UTC_TIMESTAMP() WHERE operator_id=?",
+				`UPDATE telephony_operator_state SET state='available',reason_id=NULL,pause_id=NULL${Object.hasOwn(state, "unavailable_since") ? ",unavailable_since=NULL" : ""},version=version+1,updated_at=UTC_TIMESTAMP() WHERE operator_id=?`,
 				[actorId],
 			);
 			await enqueuePbx(tx, actorId, false, operationId);
@@ -635,7 +651,7 @@ export async function executeRuntime(
 			await beginPause(tx, state, reasonId, now, operationId);
 		}
 		const result = await stateView(tx, actorId);
-		await saveReceipt(tx, actorId, operationId, "pause", input, result);
+		await saveReceipt(tx, actorId, operationId, "pause", semantic, result);
 		return result;
 	}
 	if (action === "pbx.pending")
