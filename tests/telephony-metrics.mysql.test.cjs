@@ -36,5 +36,19 @@ for(const port of [13555,13480])test(`metrics and observed sessions MySQL ${port
    await db.query("INSERT INTO telephony_calls(id,operator_id,direction,number,state,prepared_at,ringing_at,answered_at,ended_at,updated_at) VALUES(?,7,'incoming','1234','ended','2026-11-14 03:30:00','2026-11-14 02:55:00','2026-11-14 02:56:00','2026-11-14 03:05:00','2026-11-14 03:30:00'),(?,7,'incoming','5678','ended','2026-11-14 03:40:00','2026-11-14 02:40:00','2026-11-14 02:41:00','2026-11-14 02:45:00','2026-11-14 03:40:00')",[randomUUID(),randomUUID()]);
    const metrics=await runtimeMetrics(tx,7);assert.equal(metrics.crmDay,'2026-11-14');assert.equal(metrics.attempts,0);assert.equal(metrics.conversationSeconds,300);
   });
+  await t.test('mixed UUID collations preserve fallback, active campaign lookup and primary-key access',async()=>{
+   await db.query('ALTER TABLE telephony_operator_state CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci');
+   await db.query(`ALTER TABLE telephony_calls CONVERT TO CHARACTER SET utf8mb4 COLLATE ${port===13480?'utf8mb4_0900_ai_ci':'utf8mb4_general_ci'}`);
+   const oldQuery='SELECT p.MAX_RESPOSTA FROM telephony_operator_state os INNER JOIN telephony_calls c ON c.id=os.active_call_id INNER JOIN campanhas_clientes cc ON cc.CODIGO=c.schedule_id INNER JOIN campanhas p ON p.CODIGO=cc.CAMPANHA WHERE os.operator_id=? AND c.ended_at IS NULL LIMIT 1';
+   await assert.rejects(()=>db.execute(oldQuery,[7]),error=>error.errno===1267);
+   assert.equal((await runtimeMetrics(tx,7)).expectedSeconds,180);
+   const id=randomUUID();await db.query("INSERT INTO telephony_calls(id,operator_id,direction,number,schedule_id,state,prepared_at,sent_at,answered_at,updated_at) VALUES(?,7,'outgoing','1234',3,'answered',UTC_TIMESTAMP(),UTC_TIMESTAMP(),UTC_TIMESTAMP(),UTC_TIMESTAMP())",[id]);
+   await db.query('INSERT INTO telephony_operator_state(operator_id,active_call_id) VALUES(7,?)',[id]);
+   const active=await runtimeMetrics(tx,7);assert.equal(active.expectedSeconds,240);assert.equal(active.expectedSource,'campaign');
+   const query='SELECT p.MAX_RESPOSTA FROM telephony_calls c INNER JOIN campanhas_clientes cc ON cc.CODIGO=c.schedule_id INNER JOIN campanhas p ON p.CODIGO=cc.CAMPANHA WHERE c.id=? AND c.operator_id=? AND c.ended_at IS NULL LIMIT 1';
+   const explain=await tx.execute('EXPLAIN '+query,[id,7]);assert.equal(explain.find(row=>row.table==='c').key,'PRIMARY');
+   await db.query('UPDATE telephony_calls SET operator_id=9 WHERE id=?',[id]);
+   assert.equal((await runtimeMetrics(tx,7)).expectedSeconds,180);
+  });
  }finally{await db.query(`DROP DATABASE IF EXISTS \`${name}\``);await db.end();}
 });

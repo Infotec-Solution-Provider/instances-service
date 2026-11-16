@@ -272,12 +272,23 @@ export async function runtimeMetrics(
 		has("campanhas_clientes", "CODIGO", "CAMPANHA") &&
 		has("campanhas", "CODIGO", "MAX_RESPOSTA")
 	) {
-		const row = (
+		// UUID columns can inherit different CRM collations. Keep the indexed UUID
+		// lookup coercible by binding the value instead of comparing both columns.
+		const activeCall = (
 			await tx.execute<Row[]>(
-				"SELECT p.MAX_RESPOSTA FROM telephony_operator_state os INNER JOIN telephony_calls c ON c.id=os.active_call_id INNER JOIN campanhas_clientes cc ON cc.CODIGO=c.schedule_id INNER JOIN campanhas p ON p.CODIGO=cc.CAMPANHA WHERE os.operator_id=? AND c.ended_at IS NULL LIMIT 1",
+				"SELECT active_call_id FROM telephony_operator_state WHERE operator_id=? LIMIT 1",
 				[actorId],
 			)
 		)[0];
+		const activeCallId = activeCall?.["active_call_id"];
+		const row = typeof activeCallId === "string" && activeCallId
+			? (
+				await tx.execute<Row[]>(
+					"SELECT p.MAX_RESPOSTA FROM telephony_calls c INNER JOIN campanhas_clientes cc ON cc.CODIGO=c.schedule_id INNER JOIN campanhas p ON p.CODIGO=cc.CAMPANHA WHERE c.id=? AND c.operator_id=? AND c.ended_at IS NULL LIMIT 1",
+					[activeCallId, actorId],
+				)
+			)[0]
+			: undefined;
 		if (row?.["MAX_RESPOSTA"] != null) {
 			result.expectedSeconds = number(row["MAX_RESPOSTA"]);
 			result.expectedSource = "campaign";
