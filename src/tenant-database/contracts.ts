@@ -6,6 +6,8 @@ export interface TenantDestination {
 	user: string;
 	password: string;
 	database: string;
+	/** Trusted per-destination protocol compatibility; never supplied by HTTP commands. */
+	charset?: "latin1_swedish_ci" | "utf8mb4_unicode_ci";
 	/** Stable physical-server group when several addresses refer to the same server. */
 	serverGroup?: string;
 	tls?: { ca?: string };

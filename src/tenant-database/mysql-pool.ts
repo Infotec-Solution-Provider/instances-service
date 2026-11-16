@@ -12,7 +12,7 @@ export const createTenantMysqlPool: PoolFactory = (
 		user: destination.user,
 		password: destination.password,
 		database: destination.database,
-		charset: "utf8mb4_unicode_ci",
+		charset: destination.charset ?? "utf8mb4_unicode_ci",
 		timezone: "Z",
 		dateStrings: true,
 		supportBigNumbers: true,

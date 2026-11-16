@@ -16,6 +16,9 @@ export function getTenantDatabase(): TenantDatabase {
 				user: server.username,
 				password: server.password,
 				database: server.database,
+				// ODIM runs MySQL 5.5.0-m2 (before utf8mb4 support). Match its
+				// proven legacy pool without changing other tenant defaults.
+				...(tenant === "odim" ? { charset: "latin1_swedish_ci" as const } : {}),
 			};
 		},
 		{...tenantDatabaseConfig(),transactionMs:30000},
