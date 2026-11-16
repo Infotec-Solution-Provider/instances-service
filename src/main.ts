@@ -2,6 +2,7 @@ import "dotenv/config";
 import "express-async-errors";
 import express, { NextFunction, Request, Response } from "express";
 import cors from "cors";
+import {createCrmRegistrationRouter} from "./crm-registration/router";
 import { handleRequestError } from "@rgranatodutra/http-errors";
 import InstancesController from "./controllers/instances.controller";
 import ServersController from "./controllers/servers.controller";
@@ -24,6 +25,7 @@ const controllers = {
 	geo: new GeoController(),
 };
 
+app.use(createCrmRegistrationRouter());
 app.use(express.json({ limit: "20mb" }));
 app.use(express.urlencoded({ limit: "20mb", extended: true }));
 app.use(cors());
