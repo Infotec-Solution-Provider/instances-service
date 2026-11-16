@@ -37,7 +37,7 @@ export const createTenantMysqlPool: PoolFactory = (
 		flags: ["FOUND_ROWS"],
 		waitForConnections: false,
 		connectionLimit: connections,
-		connectTimeout: timeoutMs,
+		connectTimeout: destination.connectionTimeoutMs ?? timeoutMs,
 		maxIdle: 0,
 		idleTimeout: 1000,
 		maxPreparedStatements: 50,

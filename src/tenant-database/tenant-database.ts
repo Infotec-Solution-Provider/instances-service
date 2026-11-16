@@ -115,7 +115,9 @@ export class TenantDatabase {
 				!destination.host ||
 				!Number.isInteger(destination.port) ||
 				destination.port < 1 ||
-				destination.port > 65535
+				destination.port > 65535 ||
+				(destination.connectionTimeoutMs !== undefined &&
+					(!Number.isSafeInteger(destination.connectionTimeoutMs) || destination.connectionTimeoutMs < 1 || destination.connectionTimeoutMs > 10000))
 			)
 				throw new TenantDatabaseError("TENANT_DESTINATION_INVALID");
 			leave = await this.admission.enter(
@@ -130,7 +132,7 @@ export class TenantDatabase {
 			);
 			const connection = await deadline(
 				lease.pool.acquire(),
-				this.config.waitMs,
+				destination.connectionTimeoutMs ?? this.config.waitMs,
 				"TENANT_CONNECTION_UNAVAILABLE",
 				(late) => late.destroy(),
 			);

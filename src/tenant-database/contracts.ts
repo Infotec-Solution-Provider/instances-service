@@ -8,6 +8,8 @@ export interface TenantDestination {
 	database: string;
 	/** Trusted per-destination protocol compatibility; never supplied by HTTP commands. */
 	charset?: "latin1_swedish_ci" | "utf8mb4_unicode_ci";
+	/** Trusted bounded TCP/authentication budget, independent of the transaction deadline. */
+	connectionTimeoutMs?: number;
 	/** Stable physical-server group when several addresses refer to the same server. */
 	serverGroup?: string;
 	tls?: { ca?: string };
