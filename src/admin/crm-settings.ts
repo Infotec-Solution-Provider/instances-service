@@ -1,7 +1,7 @@
 import { getTenantDatabase } from "../services/tenant-database.service";
 import PoolsService from "../services/pools.service";
 import { TenantDatabaseError } from "../tenant-database/error";
-import { AdminCommand, AdminMutationResult, AdminProtocolError, AdminSetting, requireRevision } from "./admin-protocol";
+import { AdminCommand, AdminMutationResult, AdminProtocolError, AdminSetting, AdminSnapshot, opaqueRevision, requireRevision } from "./admin-protocol";
 import { diff, Query, readReceipt, secretKey, snapshot, tenant, validateChanges, writeReceipt } from "./settings-utils";
 import { crmParameterSettings } from "./crm-parameter-settings.metadata";
 
@@ -30,13 +30,29 @@ function userId(command: AdminCommand): number {
   if (!Number.isSafeInteger(id) || id! <= 0 || id! > 2147483647) throw new AdminProtocolError(400, "Selecione um operador do tenant alvo.");
   return id!;
 }
-async function current(command: AdminCommand, query: Query, lock = false) {
+/** Only positively identified schema/data absence is an unavailable capability. */
+class CrmSettingsUnavailable extends AdminProtocolError {
+  constructor(public readonly reason: "TABLE_MISSING" | "SCHEMA_UNSUPPORTED" | "INITIAL_ROW_MISSING", message: string) { super(503, message); }
+}
+function unavailableSnapshot(command: AdminCommand, error: CrmSettingsUnavailable): AdminSnapshot {
+  return {
+    source: command.source!, tenant: tenant(command), ...(command.target ? { target: command.target } : {}),
+    revision: opaqueRevision({ environment: command.environment, tenant: command.tenant, source: command.source, target: command.target ?? null }, { available: false, reason: error.reason }),
+    catalog: [], values: {}, secrets: {}, resources: [], unavailableReason: error.message,
+  };
+}
+async function configurationSchema(command: AdminCommand, query: Query) {
   const source = command.source!, name = table(source);
   const columns = await query<Column[]>("SELECT COLUMN_NAME AS `key`,DATA_TYPE AS type,COLUMN_TYPE AS columnType,IS_NULLABLE AS nullable,COLUMN_DEFAULT AS defaultValue,CHARACTER_MAXIMUM_LENGTH AS maxLength,EXTRA AS extra FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? ORDER BY ORDINAL_POSITION", [name]);
-  if (!columns.length) throw new AdminProtocolError(503, "Tabela de configuração indisponível neste CRM. Prepare as migrações existentes.");
+  if (!columns.length) throw new CrmSettingsUnavailable("TABLE_MISSING", "Esta configuração não está habilitada no CRM deste tenant neste ambiente. Selecione outra configuração ou outro tenant.");
   const selected = columns.filter(column => source === "sip-global" ? sipGlobalFields.has(column.key) : source === "sip-user" ? sipUserFields.has(column.key) : source === "webrtc" ? webFields.has(column.key) : column.key !== "CODIGO" && !column.extra.includes("auto_increment") && !column.extra.includes("GENERATED"));
   const primary = source === "sip-user" ? "COD_CONFIG_SIP" : source === "webrtc" ? "id" : "CODIGO";
-  if (!columns.some(column => column.key === primary)) throw new AdminProtocolError(503, "Schema de configuração não suportado.");
+  const required = source === "sip-user" ? [primary, "COD_OPERADOR"] : [primary];
+  if (!required.every(key => columns.some(column => column.key === key)) || !selected.length) throw new CrmSettingsUnavailable("SCHEMA_UNSUPPORTED", "O schema desta configuração ainda não é suportado para este tenant. Nenhum valor foi consultado ou alterado.");
+  return { name, selected, primary };
+}
+async function current(command: AdminCommand, query: Query, lock = false) {
+  const source = command.source!, { name, selected, primary } = await configurationSchema(command, query);
   if (source === "sip-user") {
     const users = await query<{ CODIGO: number }[]>(`SELECT CODIGO FROM operadores WHERE CODIGO=?${lock ? " FOR UPDATE" : ""}`, [userId(command)]);
     if (!users[0]) throw new AdminProtocolError(404, "Operador não encontrado no tenant alvo.");
@@ -44,7 +60,7 @@ async function current(command: AdminCommand, query: Query, lock = false) {
   const fields = [primary, ...selected.map(column => column.key)].map(quote).join(",");
   const where = source === "sip-user" ? " WHERE COD_OPERADOR=?" : source === "webrtc" ? " WHERE id=1" : "";
   const rows = await query<Record<string, unknown>[]>(`SELECT ${fields} FROM ${quote(name)}${where} ORDER BY ${quote(primary)} ASC LIMIT 1${lock ? " FOR UPDATE" : ""}`, source === "sip-user" ? [userId(command)] : []);
-  if (!rows[0] && source !== "sip-user" && source !== "webrtc") throw new AdminProtocolError(503, "Cadastre o registro inicial de parâmetros no CRM legado.");
+  if (!rows[0] && source !== "sip-user" && source !== "webrtc") throw new CrmSettingsUnavailable("INITIAL_ROW_MISSING", "Esta configuração ainda não possui registro inicial no CRM deste tenant. Nenhum registro será criado automaticamente.");
   const values = rows[0] ?? Object.fromEntries(selected.map(column => [column.key, column.defaultValue]));
   if (!rows[0] && source === "webrtc") Object.assign(values, { id: null, enabled: 0, connection_mode: "direct", websocket_url: "", sip_domain: "", pbx_address: "", ice_servers_json: "[]" });
   const catalog: AdminSetting[] = selected.map(column => {
@@ -84,11 +100,22 @@ function validateWebrtc(state: Record<string, unknown>): void {
 }
 export async function crmSettings(command: AdminCommand): Promise<unknown> {
   if (!crmSources.has(command.source ?? "")) throw new AdminProtocolError(400, "Fonte CRM inválida.");
+  try { return await executeCrmSettings(command); }
+  catch (error) {
+    if (error instanceof CrmSettingsUnavailable) {
+      if (command.action === "getSettings") return unavailableSnapshot(command, error);
+      if (command.action === "getTargets") return { targets: [], hasMore: false, unavailableReason: error.message };
+    }
+    throw error;
+  }
+}
+async function executeCrmSettings(command: AdminCommand): Promise<unknown> {
   const read: Query = async <T>(sql: string, params: unknown[] = []) => PoolsService.query(tenant(command), sql, params, { retryOnConnectionLoss: false }) as Promise<T>;
   if (command.action === "getReceipt") return await readReceipt(read, command) ?? { found: false };
   if (command.action === "getTargets" && command.source === "sip-user") {
     const search = command.search ?? "";
     if (search.length > 100) throw new AdminProtocolError(400, "Busca muito extensa.");
+    await configurationSchema(command, read);
     const rows = await read<{ id: number; label: string; active: string }[]>("SELECT CODIGO AS id,NOME AS label,ATIVO AS active FROM operadores WHERE (LOCATE(?,NOME)>0 OR CAST(CODIGO AS CHAR)=?) ORDER BY NOME,CODIGO LIMIT 50", [search, search]);
     return { targets: rows.map(row => ({ ...row, active: row.active === "SIM" })) };
   }
