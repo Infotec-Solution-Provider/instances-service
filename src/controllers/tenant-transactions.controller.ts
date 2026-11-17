@@ -1,3 +1,4 @@
+import { correctScheduleResult, parseResultCorrection, resultCorrectionTables } from "../tenant-database/result-correction";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { Router } from "express";
 import { getTenantDatabase } from "../services/tenant-database.service";
@@ -574,10 +575,15 @@ export function createTenantTransactionsRouter(
 					return res.json({ data: result });
 				} catch (error) {
 					if (error instanceof FinishV2Error) return res.status(error.status).json({ code: `TENANT_${error.code}`, message: error.message, outcome: "NOT_COMMITTED" });
-					if(error instanceof TenantDatabaseError && error.code.startsWith("TENANT_TELEPHONY_FINISH")) return res.status(error.code.endsWith("INVALID")?400:error.code.endsWith("FORBIDDEN")?403:409).json({code:error.code,message:"Releia o atendimento e a configuraÃ§Ã£o da empresa antes de finalizar.",outcome:error.outcome});
+					if(error instanceof TenantDatabaseError && error.code.startsWith("TENANT_TELEPHONY_FINISH")) return res.status(error.code.endsWith("INVALID")?400:error.code.endsWith("FORBIDDEN")?403:409).json({code:error.code,message:"Releia o atendimento e a configuração da empresa antes de finalizar.",outcome:error.outcome});
 					throw error;
 				}
 			}
+			if (req.body?.operation === "crm.schedule.correct-result") {
+                const command = parseResultCorrection(req.body);
+                const result = await database().transaction(req.params["instance"]!, command.operation, resultCorrectionTables, tx => correctScheduleResult(tx, command));
+                return res.json({ data: result });
+            }
 			if (req.body?.operation === "crm.administration.transfer") {
 				const command = parseTransfer(req.body);
 				const result = await database().transaction(
