@@ -76,7 +76,7 @@ export async function correctScheduleResult(
 		throw new TenantDatabaseError("TENANT_TRANSACTION_UNREVIEWED_TRIGGERS");
 	const actor = await tx.execute<
 		{ ATIVO: string; NIVEL: string; SETOR: number }[]
-	>("SELECT ATIVO,NIVEL,SETOR FROM operadores WHERE CODIGO=? FOR UPDATE", [
+	>(`SELECT ATIVO,NIVEL,${tx.tenant === "nunes" ? "SETOR" : "NULL AS SETOR"} FROM operadores WHERE CODIGO=? FOR UPDATE`, [
 		input.actorId,
 	]);
 	if (
@@ -88,7 +88,7 @@ export async function correctScheduleResult(
 	const schedules = await tx.execute<
 		{ RESULTADO: number; CONCLUIDO: string; SETOR: number }[]
 	>(
-		"SELECT cc.RESULTADO,cc.CONCLUIDO,c.SETOR FROM campanhas_clientes cc INNER JOIN clientes c ON c.CODIGO=cc.CLIENTE WHERE cc.CODIGO=? FOR UPDATE",
+		`SELECT cc.RESULTADO,cc.CONCLUIDO,${tx.tenant === "nunes" ? "c.SETOR" : "NULL AS SETOR"} FROM campanhas_clientes cc INNER JOIN clientes c ON c.CODIGO=cc.CLIENTE WHERE cc.CODIGO=? FOR UPDATE`,
 		[input.scheduleId],
 	);
 	const row = schedules[0];

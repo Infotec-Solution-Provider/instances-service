@@ -70,6 +70,11 @@ test("bloqueia ficha alterada, proposta alterada, operador e setor indevidos", a
 		assert.equal(tx.writes.length, 0);
 	}
 });
+test("tenants comuns não exigem coluna de setor", async () => {
+ const tx=fixture(); const queries=[]; const execute=tx.execute; tx.execute=async (sql,params) => { queries.push(sql); return execute(sql,params); };
+ await correctScheduleResult(tx,command);
+ assert.ok(queries.some(sql => sql.includes("NULL AS SETOR") && sql.includes("campanhas_clientes cc")));
+});
 test("valida os dados e aceita resultados antigos negativos", () => {
 	assert.equal(
 		parseResultCorrection({ ...command, oldResult: -10 }).oldResult,
